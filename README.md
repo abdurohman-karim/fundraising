@@ -65,9 +65,15 @@ cp .env.example .env
 
 ### На сервере (systemd)
 
-Скопируйте проект в `/opt/fundraising`, создайте там `.venv` и `.env`, затем:
+С вашего компьютера, из папки проекта:
 
 ```bash
-sudo cp fundraising-bot.service /etc/systemd/system/
-sudo systemctl enable --now fundraising-bot
+./deploy.sh root@IP_СЕРВЕРА
 ```
+
+Скрипт копирует проект в `/home/bots/fundraising`, ставит зависимости и службу `fundraising-bot`.
+При первом запуске он создаёт `.env` и останавливается: впишите `BOT_TOKEN` и `ADMIN_CHAT_ID`
+(`nano /home/bots/fundraising/.env`) и запустите `./deploy.sh` ещё раз. Дальше та же команда — обновление.
+База (`data/bot.db`) и `.env` на сервере не перезаписываются.
+
+Логи: `journalctl -u fundraising-bot -f`.
