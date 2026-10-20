@@ -183,9 +183,10 @@ class DB:
         kind: str, title: str, amount: int, currency: str,
     ) -> int:
         """Черновик сбора; участники — все жильцы чата."""
+        # share указываем явно: в базе первой версии у колонки нет значения по умолчанию.
         cur = await self.conn.execute(
             "INSERT INTO collections (chat_id, chat_title, creator_id, creator_name, kind, title, amount, currency, "
-            "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "share, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
             (chat_id, chat_title, creator_id, creator_name, kind, title, amount, currency, DRAFT, int(time.time())),
         )
         cid = cur.lastrowid
