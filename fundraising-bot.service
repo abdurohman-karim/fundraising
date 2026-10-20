@@ -1,0 +1,12 @@
+[Unit]
+Description=Telegram fundraising bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/fundraising
+ExecStart=/opt/fundraising/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
