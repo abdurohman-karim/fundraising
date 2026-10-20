@@ -19,7 +19,7 @@ _CUR = r"(?P<cur>\$|usd|dollars?|долл\w*|дол|сум\w*|сўм|sum|som|so[
 AMOUNT_RE = re.compile(
     r"^\s*(?P<pre>\$)?\s*"
     r"(?P<num>\d{1,3}(?:[  ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)\s*"
-    r"(?P<mul>k|к|тыс\.?)?\s*"
+    r"(?P<mul>k|к|тыс\.?|ming)?\s*"
     + _CUR + r"?"
     r"(?=\s|$)\s*(?P<title>.*)$",
     re.IGNORECASE | re.DOTALL,
@@ -58,14 +58,14 @@ def split_share(amount: int, currency: str, people: int) -> int:
     return -(-amount // (people * step)) * step
 
 
-def fmt_money(minor: int, currency: str) -> str:
+def fmt_money(minor: int, currency: str, lang: str = "ru") -> str:
     if currency == USD:
         if minor % 100 == 0:
             s = f"{minor // 100:,}"
         else:
             s = f"{minor / 100:,.2f}"
         return "$" + s.replace(",", " ")
-    return f"{minor:,}".replace(",", " ") + " сум"
+    return f"{minor:,}".replace(",", " ") + (" so'm" if lang == "uz" else " сум")
 
 
 def parse_card(text: str) -> Optional[Tuple[str, str]]:
@@ -77,12 +77,12 @@ def parse_card(text: str) -> Optional[Tuple[str, str]]:
     return number, m.group("holder").strip()
 
 
-def card_type(number: str) -> str:
+def card_type(number: str) -> Optional[str]:
     if number.startswith("9860"):
         return "Humo"
     if number.startswith(("8600", "5614")):
         return "Uzcard"
-    return "Карта"
+    return None
 
 
 def fmt_card(number: str) -> str:

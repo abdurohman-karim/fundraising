@@ -1,26 +1,32 @@
 import asyncio
 import logging
 import os
+from typing import Any, Awaitable, Callable, Dict
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, TelegramObject
 from dotenv import load_dotenv
 
 from db import DB
 from handlers import router
+from i18n import DEFAULT_LANG
 
-COMMANDS = [
-    BotCommand(command="new", description="Новый сбор: /new 300000 Коммуналка"),
-    BotCommand(command="list", description="Открытые сборы"),
-    BotCommand(command="debts", description="Мои долги"),
-    BotCommand(command="join", description="Войти в список жильцов"),
-    BotCommand(command="leave", description="Выйти из списка"),
-    BotCommand(command="members", description="Список жильцов"),
-    BotCommand(command="card", description="Моя карта Uzcard / Humo"),
-    BotCommand(command="help", description="Как пользоваться"),
-]
+
+class LangMiddleware(BaseMiddleware):
+    """Кладёт язык текущего чата в аргумент `lang` обработчиков."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        chat = data.get("event_chat")
+        lang = await data["db"].get_lang(chat.id) if chat else None
+        data["lang"] = lang or DEFAULT_LANG
+        return await handler(event, data)
 
 
 async def main() -> None:
@@ -36,9 +42,11 @@ async def main() -> None:
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(db=db)
+    dp.message.middleware(LangMiddleware())
+    dp.callback_query.middleware(LangMiddleware())
     dp.include_router(router)
 
-    await bot.set_my_commands(COMMANDS)
+    await bot.set_my_commands([BotCommand(command="menu", description="Меню / Menyu")])
     try:
         await dp.start_polling(bot)
     finally:

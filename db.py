@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import aiosqlite
 
+DRAFT, OPEN, CLOSED = "draft", "open", "closed"
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY,
+    lang    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS members (
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -29,9 +36,9 @@ CREATE TABLE IF NOT EXISTS collections (
     title        TEXT    NOT NULL,
     amount       INTEGER NOT NULL,
     currency     TEXT    NOT NULL,
-    share        INTEGER NOT NULL,
+    share        INTEGER NOT NULL DEFAULT 0,
     message_id   INTEGER,
-    is_open      INTEGER NOT NULL DEFAULT 1,
+    status       TEXT    NOT NULL DEFAULT 'draft',
     created_at   INTEGER NOT NULL
 );
 
@@ -58,13 +65,37 @@ class DB:
         self.conn.row_factory = aiosqlite.Row
         await self.conn.execute("PRAGMA foreign_keys = ON")
         await self.conn.executescript(SCHEMA)
+        await self._migrate()
         await self.conn.commit()
+
+    async def _migrate(self) -> None:
+        # Первая версия хранила is_open вместо status.
+        cur = await self.conn.execute("PRAGMA table_info(collections)")
+        columns = {row["name"] for row in await cur.fetchall()}
+        if "status" not in columns:
+            await self.conn.execute("ALTER TABLE collections ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
+            await self.conn.execute("UPDATE collections SET status = 'closed' WHERE is_open = 0")
 
     async def close(self) -> None:
         if self.conn:
             await self.conn.close()
 
-    # --- участники чата ---
+    # --- язык чата ---
+
+    async def get_lang(self, chat_id: int) -> Optional[str]:
+        cur = await self.conn.execute("SELECT lang FROM chats WHERE chat_id = ?", (chat_id,))
+        row = await cur.fetchone()
+        return row["lang"] if row else None
+
+    async def set_lang(self, chat_id: int, lang: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO chats (chat_id, lang) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET lang = excluded.lang",
+            (chat_id, lang),
+        )
+        await self.conn.commit()
+
+    # --- жильцы чата ---
 
     async def add_member(self, chat_id: int, user_id: int, name: str) -> bool:
         """True, если человек добавлен впервые."""
@@ -113,26 +144,19 @@ class DB:
 
     # --- сборы ---
 
-    async def create_collection(
-        self,
-        chat_id: int,
-        creator_id: int,
-        creator_name: str,
-        title: str,
-        amount: int,
-        currency: str,
-        share: int,
-        participants: List[Tuple[int, str]],
+    async def create_draft(
+        self, chat_id: int, creator_id: int, creator_name: str, title: str, amount: int, currency: str
     ) -> int:
+        """Черновик сбора; участники — все жильцы чата."""
         cur = await self.conn.execute(
-            "INSERT INTO collections (chat_id, creator_id, creator_name, title, amount, currency, share, created_at) "
+            "INSERT INTO collections (chat_id, creator_id, creator_name, title, amount, currency, status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, creator_id, creator_name, title, amount, currency, share, int(time.time())),
+            (chat_id, creator_id, creator_name, title, amount, currency, DRAFT, int(time.time())),
         )
         cid = cur.lastrowid
-        await self.conn.executemany(
-            "INSERT INTO shares (collection_id, user_id, name, paid) VALUES (?, ?, ?, ?)",
-            [(cid, uid, name, 1 if uid == creator_id else 0) for uid, name in participants],
+        await self.conn.execute(
+            "INSERT INTO shares (collection_id, user_id, name) SELECT ?, user_id, name FROM members WHERE chat_id = ?",
+            (cid, chat_id),
         )
         await self.conn.commit()
         return cid
@@ -152,6 +176,40 @@ class DB:
         )
         return list(await cur.fetchall())
 
+    async def add_share(self, cid: int, user_id: int, name: str) -> None:
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO shares (collection_id, user_id, name) VALUES (?, ?, ?)", (cid, user_id, name)
+        )
+        await self.conn.commit()
+
+    async def remove_share(self, cid: int, user_id: int) -> bool:
+        cur = await self.conn.execute(
+            "DELETE FROM shares WHERE collection_id = ? AND user_id = ?", (cid, user_id)
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def set_amount(self, cid: int, amount: int, currency: str) -> None:
+        await self.conn.execute(
+            "UPDATE collections SET amount = ?, currency = ? WHERE id = ?", (amount, currency, cid)
+        )
+        await self.conn.commit()
+
+    async def open_draft(self, cid: int, share: int) -> None:
+        await self.conn.execute(
+            "UPDATE collections SET status = ?, share = ? WHERE id = ?", (OPEN, share, cid)
+        )
+        await self.conn.execute(
+            "UPDATE shares SET paid = 1 WHERE collection_id = ? "
+            "AND user_id = (SELECT creator_id FROM collections WHERE id = ?)",
+            (cid, cid),
+        )
+        await self.conn.commit()
+
+    async def delete_collection(self, cid: int) -> None:
+        await self.conn.execute("DELETE FROM collections WHERE id = ?", (cid,))
+        await self.conn.commit()
+
     async def toggle_paid(self, cid: int, user_id: int) -> Optional[bool]:
         """Переключает отметку об оплате. None — человек не участвует в сборе."""
         cur = await self.conn.execute(
@@ -166,25 +224,32 @@ class DB:
         return bool((await cur.fetchone())["paid"])
 
     async def close_collection(self, cid: int) -> None:
-        await self.conn.execute("UPDATE collections SET is_open = 0 WHERE id = ?", (cid,))
+        await self.conn.execute("UPDATE collections SET status = ? WHERE id = ?", (CLOSED, cid))
         await self.conn.commit()
 
-    async def open_collections(self, chat_id: int) -> List[aiosqlite.Row]:
+    async def chat_collections(self, chat_id: int, status: str) -> List[aiosqlite.Row]:
         cur = await self.conn.execute(
             "SELECT c.*, "
             "(SELECT COUNT(*) FROM shares s WHERE s.collection_id = c.id) AS total, "
             "(SELECT COUNT(*) FROM shares s WHERE s.collection_id = c.id AND s.paid = 1) AS paid_count "
-            "FROM collections c WHERE c.chat_id = ? AND c.is_open = 1 ORDER BY c.id",
-            (chat_id,),
+            "FROM collections c WHERE c.chat_id = ? AND c.status = ? ORDER BY c.id",
+            (chat_id, status),
+        )
+        return list(await cur.fetchall())
+
+    async def creator_active(self, user_id: int) -> List[aiosqlite.Row]:
+        """Черновики и открытые сборы, где человек — получатель денег."""
+        cur = await self.conn.execute(
+            "SELECT id FROM collections WHERE creator_id = ? AND status IN (?, ?)", (user_id, DRAFT, OPEN)
         )
         return list(await cur.fetchall())
 
     async def user_debts(self, user_id: int, chat_id: Optional[int] = None) -> List[aiosqlite.Row]:
         sql = (
             "SELECT c.* FROM collections c JOIN shares s ON s.collection_id = c.id "
-            "WHERE s.user_id = ? AND s.paid = 0 AND c.is_open = 1"
+            "WHERE s.user_id = ? AND s.paid = 0 AND c.status = ?"
         )
-        params: tuple = (user_id,)
+        params: tuple = (user_id, OPEN)
         if chat_id is not None:
             sql += " AND c.chat_id = ?"
             params += (chat_id,)
