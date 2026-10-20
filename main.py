@@ -15,7 +15,7 @@ from i18n import DEFAULT_LANG
 
 
 class LangMiddleware(BaseMiddleware):
-    """Кладёт язык текущего чата в аргумент `lang` обработчиков."""
+    """Кладёт язык бота в аргумент `lang` обработчиков."""
 
     async def __call__(
         self,
@@ -23,9 +23,7 @@ class LangMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any],
     ) -> Any:
-        chat = data.get("event_chat")
-        lang = await data["db"].get_lang(chat.id) if chat else None
-        data["lang"] = lang or DEFAULT_LANG
+        data["lang"] = await data["db"].get_lang() or DEFAULT_LANG
         return await handler(event, data)
 
 
@@ -37,11 +35,14 @@ async def main() -> None:
     if not token:
         raise SystemExit("BOT_TOKEN не задан (см. .env.example)")
 
+    admin = os.getenv("ADMIN_CHAT_ID", "").strip()
+    admin_id = int(admin) if admin else None
+
     db = DB(os.getenv("DB_PATH", "data/bot.db"))
     await db.connect()
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(db=db)
+    dp = Dispatcher(db=db, admin_id=admin_id)
     dp.message.middleware(LangMiddleware())
     dp.callback_query.middleware(LangMiddleware())
     dp.include_router(router)
