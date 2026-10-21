@@ -266,6 +266,10 @@ class DB:
         await self.conn.execute("DELETE FROM shares WHERE collection_id = ?", (cid,))
         await self.conn.commit()
 
+    async def set_title(self, cid: int, title: str) -> None:
+        await self.conn.execute("UPDATE collections SET title = ? WHERE id = ?", (title, cid))
+        await self.conn.commit()
+
     async def set_amount(self, cid: int, amount: int, currency: str) -> None:
         await self.conn.execute(
             "UPDATE collections SET amount = ?, currency = ? WHERE id = ?", (amount, currency, cid)

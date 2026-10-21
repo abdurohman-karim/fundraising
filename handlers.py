@@ -41,6 +41,7 @@ class Form(StatesGroup):
     card = State()
     receipt = State()
     add_members = State()
+    title = State()
 
 
 # ---------- помощники ----------
@@ -205,9 +206,10 @@ async def render_draft(db: DB, c, lang: str) -> Tuple[str, InlineKeyboardMarkup]
             kb.button(text=t(lang, "btn_card"), callback_data=Act(action="card"))
             sizes.append(1)
 
+    kb.button(text=t(lang, "btn_edit"), callback_data=Act(action="edit", cid=cid))
     kb.button(text=t(lang, "btn_create"), callback_data=Act(action="create", cid=cid))
     kb.button(text=t(lang, "btn_cancel"), callback_data=Act(action="cancel", cid=cid))
-    sizes.append(2)
+    sizes += [1, 2]
     kb.adjust(*sizes)
     return text, kb.as_markup()
 
@@ -271,8 +273,9 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_pay"), url=await start_link(bot, f"pay_{cid}"))
     kb.button(text=t(lang, "btn_remind"), callback_data=Act(action="remind", cid=cid))
+    kb.button(text=t(lang, "btn_edit"), url=await start_link(bot, f"edit_{cid}"))
     kb.button(text=t(lang, "btn_close"), callback_data=Act(action="close", cid=cid))
-    kb.adjust(1, 2)
+    kb.adjust(1, 3)
     return "\n".join(lines), kb.as_markup()
 
 
@@ -333,6 +336,8 @@ async def cmd_start_private(message: Message, command: CommandObject, db: DB, la
         await start_new(message, db, lang, state, bot, int(arg), message.from_user.id == admin_id)
     elif action == "pay" and arg.isdigit():
         await start_pay(message, db, lang, state, int(arg))
+    elif action == "edit" and arg.isdigit():
+        await start_edit(message, message.from_user.id, db, lang, state, int(arg))
     elif args == "card":
         await ask_card(message, message.from_user, db, lang, state)
     elif args == "debts":
@@ -749,6 +754,41 @@ async def cb_cancel(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
     await db.delete_collection(c["id"])
     await call.answer()
     await safe_edit(call.message, t(lang, "cancelled"))
+
+
+# ---------- изменение названия (в личке) ----------
+
+@router.callback_query(Act.filter(F.action == "edit"))
+async def cb_edit(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext):
+    await call.answer()
+    await start_edit(call.message, call.from_user.id, db, lang, state, callback_data.cid)
+
+
+async def start_edit(message: Message, user_id: int, db: DB, lang: str, state: FSMContext, cid: int) -> None:
+    c = await db.get_collection(cid)
+    if not c or c["status"] == CLOSED:
+        await message.answer(t(lang, "already_closed"))
+        return
+    if user_id != c["creator_id"]:
+        await message.answer(t(lang, "only_creator"))
+        return
+    await state.set_state(Form.title)
+    await state.update_data(cid=cid)
+    await message.answer(t(lang, "ask_title", title=esc(c["title"])), reply_markup=cancel_kb(lang))
+
+
+@router.message(Form.title, PRIVATE, F.text)
+async def on_title(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot):
+    title = message.text.strip()[:100]
+    data = await state.get_data()
+    await state.clear()
+    c = await db.get_collection(data["cid"])
+    if not c or c["status"] == CLOSED:
+        await message.answer(t(lang, "already_closed"))
+        return
+    await db.set_title(c["id"], title)
+    await refresh(db, bot, c["id"])
+    await message.answer(t(lang, "title_saved", title=esc(title)))
 
 
 # ---------- оплата с чеком (в личке) ----------

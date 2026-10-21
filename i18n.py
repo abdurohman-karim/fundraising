@@ -38,6 +38,7 @@ TEXTS = {
         "btn_cancel": "✖️ Отмена",
         "btn_currency": "💱 Валюта: {cur}",
         "btn_reset_order": "🔄 Сбросить порядок",
+        "btn_edit": "✏️ Изменить",
         "btn_prepaid": "уже оплатил",
         "btn_kind_split": "💰 Поделить сумму",
         "btn_kind_queue": "🔁 По очереди",
@@ -108,6 +109,8 @@ TEXTS = {
         "need_queue": "В очереди должно быть хотя бы 2 человека",
         "queue_admin_only": "Очередь может создать только администратор бота",
         "only_creator": "Это может сделать только автор сбора",
+        "ask_title": "Сейчас: <b>{title}</b>\nОтправьте новое название сбора:",
+        "title_saved": "✅ Название изменено: <b>{title}</b>",
         # --- карточка: поделить сумму ---
         "paid_by": "Оплатил(а): <b>{name}</b> — {amount}",
         "per_person": "Участников: {n} · с каждого: <b>{share}</b>",
@@ -189,6 +192,7 @@ TEXTS = {
         "btn_cancel": "✖️ Bekor qilish",
         "btn_currency": "💱 Valyuta: {cur}",
         "btn_reset_order": "🔄 Tartibni tozalash",
+        "btn_edit": "✏️ Tahrirlash",
         "btn_prepaid": "to'lagan",
         "btn_kind_split": "💰 Summani bo'lish",
         "btn_kind_queue": "🔁 Navbat bilan",
@@ -259,6 +263,8 @@ TEXTS = {
         "need_queue": "Navbatda kamida 2 kishi bo'lishi kerak",
         "queue_admin_only": "Navbatni faqat bot administratori yaratadi",
         "only_creator": "Buni faqat yig'im muallifi qila oladi",
+        "ask_title": "Hozir: <b>{title}</b>\nYig'imning yangi nomini yuboring:",
+        "title_saved": "✅ Nomi o'zgartirildi: <b>{title}</b>",
         # --- kartochka: summani bo'lish ---
         "paid_by": "To'lagan: <b>{name}</b> — {amount}",
         "per_person": "Ishtirokchilar: {n} · har biridan: <b>{share}</b>",
