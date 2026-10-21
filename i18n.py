@@ -39,6 +39,7 @@ TEXTS = {
         "btn_currency": "💱 Валюта: {cur}",
         "btn_reset_order": "🔄 Сбросить порядок",
         "btn_edit": "✏️ Изменить",
+        "btn_mine": "✏️ Мои сборы",
         "btn_prepaid": "уже оплатил",
         "btn_kind_split": "💰 Поделить сумму",
         "btn_kind_queue": "🔁 По очереди",
@@ -111,6 +112,8 @@ TEXTS = {
         "only_creator": "Это может сделать только автор сбора",
         "ask_title": "Сейчас: <b>{title}</b>\nОтправьте новое название сбора:",
         "title_saved": "✅ Название изменено: <b>{title}</b>",
+        "mine_title": "Ваши открытые сборы — нажмите, чтобы изменить название:",
+        "mine_empty": "У вас нет открытых сборов",
         # --- карточка: поделить сумму ---
         "paid_by": "Оплатил(а): <b>{name}</b> — {amount}",
         "per_person": "Участников: {n} · с каждого: <b>{share}</b>",
@@ -193,6 +196,7 @@ TEXTS = {
         "btn_currency": "💱 Valyuta: {cur}",
         "btn_reset_order": "🔄 Tartibni tozalash",
         "btn_edit": "✏️ Tahrirlash",
+        "btn_mine": "✏️ Mening yig'imlarim",
         "btn_prepaid": "to'lagan",
         "btn_kind_split": "💰 Summani bo'lish",
         "btn_kind_queue": "🔁 Navbat bilan",
@@ -265,6 +269,8 @@ TEXTS = {
         "only_creator": "Buni faqat yig'im muallifi qila oladi",
         "ask_title": "Hozir: <b>{title}</b>\nYig'imning yangi nomini yuboring:",
         "title_saved": "✅ Nomi o'zgartirildi: <b>{title}</b>",
+        "mine_title": "Ochiq yig'imlaringiz — nomini o'zgartirish uchun bosing:",
+        "mine_empty": "Sizda ochiq yig'imlar yo'q",
         # --- kartochka: summani bo'lish ---
         "paid_by": "To'lagan: <b>{name}</b> — {amount}",
         "per_person": "Ishtirokchilar: {n} · har biridan: <b>{share}</b>",

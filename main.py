@@ -10,7 +10,7 @@ from aiogram.types import BotCommand, TelegramObject
 from dotenv import load_dotenv
 
 from db import DB
-from handlers import router
+from handlers import refresh_open, router
 from i18n import DEFAULT_LANG
 
 
@@ -48,6 +48,7 @@ async def main() -> None:
     dp.include_router(router)
 
     await bot.set_my_commands([BotCommand(command="menu", description="Меню / Menyu")])
+    await refresh_open(db, bot)
     try:
         await dp.start_polling(bot)
     finally:

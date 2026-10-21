@@ -100,7 +100,8 @@ async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin:
         me = await bot.me()
         kb.button(text=t(lang, "btn_card"), callback_data=Act(action="card"))
         kb.button(text=t(lang, "btn_debts"), callback_data=Act(action="debts"))
-        sizes = [2]
+        kb.button(text=t(lang, "btn_mine"), callback_data=Act(action="mine"))
+        sizes = [2, 1]
         if is_admin:
             kb.button(text=t(lang, "btn_add_member"), callback_data=Act(action="addm"))
             kb.button(text=t(lang, "btn_lang"), callback_data=Act(action="lang"))
@@ -273,9 +274,8 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_pay"), url=await start_link(bot, f"pay_{cid}"))
     kb.button(text=t(lang, "btn_remind"), callback_data=Act(action="remind", cid=cid))
-    kb.button(text=t(lang, "btn_edit"), url=await start_link(bot, f"edit_{cid}"))
     kb.button(text=t(lang, "btn_close"), callback_data=Act(action="close", cid=cid))
-    kb.adjust(1, 3)
+    kb.adjust(1, 2)
     return "\n".join(lines), kb.as_markup()
 
 
@@ -290,6 +290,12 @@ async def refresh(db: DB, bot: Bot, cid: int) -> None:
         await bot.edit_message_text(text, chat_id=chat_id, message_id=c["message_id"], reply_markup=markup)
     except TelegramAPIError:
         pass  # сообщение не изменилось или удалено
+
+
+async def refresh_open(db: DB, bot: Bot) -> None:
+    """При запуске перерисовывает открытые карточки — чтобы после обновления бота у них были новые кнопки."""
+    for cid in await db.open_ids():
+        await refresh(db, bot, cid)
 
 
 async def creator_only(call: CallbackQuery, db: DB, cid: int, lang: str, status: str):
@@ -743,7 +749,10 @@ async def cb_create(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
         return
     await db.set_message_id(c["id"], sent.message_id)
     await call.answer()
-    await safe_edit(call.message, t(lang, "draft_published", title=esc(c["title"]), group=esc(c["chat_title"])))
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_edit"), callback_data=Act(action="edit", cid=c["id"]))
+    await safe_edit(call.message, t(lang, "draft_published", title=esc(c["title"]), group=esc(c["chat_title"])),
+                    kb.as_markup())
 
 
 @router.callback_query(Act.filter(F.action == "cancel"))
@@ -757,6 +766,22 @@ async def cb_cancel(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
 
 
 # ---------- изменение названия (в личке) ----------
+
+@router.callback_query(Act.filter(F.action == "mine"))
+async def cb_mine(call: CallbackQuery, db: DB, lang: str):
+    """Открытые сборы автора — отсюда их можно переименовать."""
+    await call.answer()
+    items = [c for c in await db.creator_active(call.from_user.id) if c["status"] == OPEN]
+    if not items:
+        await call.message.answer(t(lang, "mine_empty"))
+        return
+    kb = InlineKeyboardBuilder()
+    for c in items:
+        icon = "🔁" if c["kind"] == QUEUE else "💰"
+        kb.button(text=f"✏️ {icon} {c['title']}"[:60], callback_data=Act(action="edit", cid=c["id"]))
+    kb.adjust(1)
+    await call.message.answer(t(lang, "mine_title"), reply_markup=kb.as_markup())
+
 
 @router.callback_query(Act.filter(F.action == "edit"))
 async def cb_edit(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext):

@@ -354,10 +354,15 @@ class DB:
         )
         return list(await cur.fetchall())
 
+    async def open_ids(self) -> List[int]:
+        cur = await self.conn.execute("SELECT id FROM collections WHERE status = ?", (OPEN,))
+        return [row["id"] for row in await cur.fetchall()]
+
     async def creator_active(self, user_id: int) -> List[aiosqlite.Row]:
         """Черновики и открытые сборы этого автора."""
         cur = await self.conn.execute(
-            "SELECT id FROM collections WHERE creator_id = ? AND status IN (?, ?)", (user_id, DRAFT, OPEN)
+            "SELECT id, title, status, kind FROM collections WHERE creator_id = ? AND status IN (?, ?) ORDER BY id",
+            (user_id, DRAFT, OPEN),
         )
         return list(await cur.fetchall())
 
