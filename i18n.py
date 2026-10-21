@@ -25,6 +25,8 @@ TEXTS = {
         "btn_join": "🙋 Я в доле",
         "btn_members": "👥 Жильцы",
         "btn_leave": "🚪 Выйти из списка",
+        "btn_add_member": "➕ Добавить жильца",
+        "btn_pick_users": "👥 Выбрать людей",
         "btn_card": "💳 Моя карта",
         "btn_lang": "🌐 Язык",
         "btn_back": "⬅️ Назад",
@@ -36,6 +38,7 @@ TEXTS = {
         "btn_cancel": "✖️ Отмена",
         "btn_currency": "💱 Валюта: {cur}",
         "btn_reset_order": "🔄 Сбросить порядок",
+        "btn_prepaid": "уже оплатил",
         "btn_kind_split": "💰 Поделить сумму",
         "btn_kind_queue": "🔁 По очереди",
         "btn_confirm": "✅ Подтвердить",
@@ -52,6 +55,15 @@ TEXTS = {
         "not_member": "Вас нет в списке",
         "members_title": "👥 <b>Жильцы ({n})</b>",
         "members_empty": "👥 Список пуст — нажмите «🙋 Я в доле»",
+        "admin_only": "Это может сделать только администратор бота",
+        "ask_members": (
+            "Нажмите «👥 Выбрать людей» внизу и отметьте, кого добавить в жильцы «{group}». "
+            "Можно выбрать сразу несколько."
+        ),
+        "members_added": "✅ Добавлены в жильцы «{group}»: {names}",
+        "members_none_new": "Все выбранные уже в списке жильцов",
+        "choose_group": "В какую группу добавить жильцов?",
+        "no_groups": "Бот пока не знает ни одной группы. Добавьте его в группу и напишите там /menu.",
         "list_title": "📋 <b>Открытые сборы</b>\nНажмите, чтобы показать сбор внизу чата:",
         "list_empty": "📋 Открытых сборов нет",
         # --- карта ---
@@ -83,13 +95,16 @@ TEXTS = {
         "draft_queue": (
             "📝 <b>Новая очередь</b> · {group}\n"
             "{title} — каждый раз {amount}\n\n"
-            "Нажимайте на участников в порядке очереди: первый в списке платит первым. "
+            "Нажимайте на участников в порядке очереди: первый в списке платит первым.\n"
+            "«✅ уже оплатил» — человек уже заплатил в этом круге (например, до бота): "
+            "сейчас он пропускает очередь, со следующего круга платит как все.\n"
             "Если кого-то нет в списке — пусть нажмёт «🙋 Я в доле» в группе."
         ),
         "draft_published": "✅ «{title}» опубликован в группе «{group}»",
         "publish_failed": "Не получилось отправить в группу — бот всё ещё в ней?",
         "need_people": "Отметьте хотя бы одного участника кроме себя",
         "need_queue": "В очереди должно быть хотя бы 2 человека",
+        "queue_admin_only": "Очередь может создать только администратор бота",
         "only_creator": "Это может сделать только автор сбора",
         # --- карточка: поделить сумму ---
         "paid_by": "Оплатил(а): <b>{name}</b> — {amount}",
@@ -159,6 +174,8 @@ TEXTS = {
         "btn_join": "🙋 Men ham",
         "btn_members": "👥 Ijarachilar",
         "btn_leave": "🚪 Ro'yxatdan chiqish",
+        "btn_add_member": "➕ Ijarachi qo'shish",
+        "btn_pick_users": "👥 Odamlarni tanlash",
         "btn_card": "💳 Kartam",
         "btn_lang": "🌐 Til",
         "btn_back": "⬅️ Orqaga",
@@ -170,6 +187,7 @@ TEXTS = {
         "btn_cancel": "✖️ Bekor qilish",
         "btn_currency": "💱 Valyuta: {cur}",
         "btn_reset_order": "🔄 Tartibni tozalash",
+        "btn_prepaid": "to'lagan",
         "btn_kind_split": "💰 Summani bo'lish",
         "btn_kind_queue": "🔁 Navbat bilan",
         "btn_confirm": "✅ Tasdiqlash",
@@ -186,6 +204,15 @@ TEXTS = {
         "not_member": "Siz ro'yxatda yo'qsiz",
         "members_title": "👥 <b>Ijarachilar ({n})</b>",
         "members_empty": "👥 Ro'yxat bo'sh — «🙋 Men ham» ni bosing",
+        "admin_only": "Buni faqat bot administratori qila oladi",
+        "ask_members": (
+            "Pastdagi «👥 Odamlarni tanlash» tugmasini bosing va «{group}» ijarachilariga kimni qo'shishni belgilang. "
+            "Bir nechtasini birdan tanlash mumkin."
+        ),
+        "members_added": "✅ «{group}» ijarachilariga qo'shildi: {names}",
+        "members_none_new": "Tanlanganlar allaqachon ijarachilar ro'yxatida",
+        "choose_group": "Ijarachilarni qaysi guruhga qo'shamiz?",
+        "no_groups": "Bot hali birorta guruhni bilmaydi. Uni guruhga qo'shing va u yerda /menu yozing.",
         "list_title": "📋 <b>Ochiq yig'imlar</b>\nChat pastida ko'rsatish uchun bosing:",
         "list_empty": "📋 Ochiq yig'imlar yo'q",
         # --- karta ---
@@ -217,13 +244,16 @@ TEXTS = {
         "draft_queue": (
             "📝 <b>Yangi navbat</b> · {group}\n"
             "{title} — har safar {amount}\n\n"
-            "Ishtirokchilarni navbat tartibida bosing: ro'yxatdagi birinchi odam birinchi to'laydi. "
+            "Ishtirokchilarni navbat tartibida bosing: ro'yxatdagi birinchi odam birinchi to'laydi.\n"
+            "«✅ to'lagan» — bu odam joriy aylanada allaqachon to'lagan (masalan, botgacha): "
+            "hozir navbatni o'tkazib yuboradi, keyingi aylanadan hamma qatori to'laydi.\n"
             "Ro'yxatda yo'q odam guruhda «🙋 Men ham» ni bossin."
         ),
         "draft_published": "✅ «{title}» «{group}» guruhida e'lon qilindi",
         "publish_failed": "Guruhga yuborib bo'lmadi — bot hali guruhdami?",
         "need_people": "O'zingizdan tashqari kamida bitta ishtirokchini belgilang",
         "need_queue": "Navbatda kamida 2 kishi bo'lishi kerak",
+        "queue_admin_only": "Navbatni faqat bot administratori yaratadi",
         "only_creator": "Buni faqat yig'im muallifi qila oladi",
         # --- kartochka: summani bo'lish ---
         "paid_by": "To'lagan: <b>{name}</b> — {amount}",

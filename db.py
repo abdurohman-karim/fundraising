@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import aiosqlite
 
@@ -15,6 +15,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+    chat_id INTEGER PRIMARY KEY
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -82,6 +86,20 @@ MIGRATIONS = [
 ]
 
 
+def next_turn(order: List[int], owed: Dict[int, int], pointer: int, rnd: int) -> Tuple[int, int]:
+    """Первый, кто ещё должен в этом круге, начиная с pointer.
+    Если таких нет — новый круг: каждому ещё по одному разу, долги и переплаты сохраняются."""
+    while True:
+        while pointer < len(order) and owed[order[pointer]] <= 0:
+            pointer += 1
+        if pointer < len(order):
+            return pointer, rnd
+        rnd += 1
+        pointer = 0
+        for u in order:
+            owed[u] += 1
+
+
 class DB:
     def __init__(self, path: str):
         self.path = path
@@ -128,6 +146,18 @@ class DB:
         )
         await self.conn.commit()
         self._lang = lang
+
+    # --- группы, где есть бот ---
+
+    async def remember_group(self, chat_id: int) -> None:
+        await self.conn.execute("INSERT OR IGNORE INTO groups (chat_id) VALUES (?)", (chat_id,))
+        await self.conn.commit()
+
+    async def known_groups(self) -> List[int]:
+        cur = await self.conn.execute(
+            "SELECT chat_id FROM groups UNION SELECT chat_id FROM members ORDER BY chat_id"
+        )
+        return [row["chat_id"] for row in await cur.fetchall()]
 
     # --- жильцы чата ---
 
@@ -246,12 +276,19 @@ class DB:
         c = await self.get_collection(cid)
         await self.conn.execute("UPDATE collections SET status = ?, share = ? WHERE id = ?", (OPEN, share, cid))
         if c["kind"] == QUEUE:
-            # Нумеруем очередь подряд с нуля; в первом круге каждый должен один раз.
-            for i, s in enumerate(await self.get_shares(cid)):
-                await self.conn.execute(
-                    "UPDATE shares SET pos = ?, owed = 1 WHERE collection_id = ? AND user_id = ?",
-                    (i, cid, s["user_id"]),
-                )
+            # Нумеруем очередь подряд с нуля. В первом круге каждый должен один раз,
+            # кроме отмеченных «уже оплатил» в черновике (paid = 1).
+            rows = await self.get_shares(cid)
+            order = [s["user_id"] for s in rows]
+            owed = {s["user_id"]: 0 if s["paid"] else 1 for s in rows}
+            pointer, rnd = next_turn(order, owed, 0, 1)
+            await self.conn.executemany(
+                "UPDATE shares SET pos = ?, owed = ?, paid = 0 WHERE collection_id = ? AND user_id = ?",
+                [(i, owed[u], cid, u) for i, u in enumerate(order)],
+            )
+            await self.conn.execute(
+                "UPDATE collections SET pointer = ?, round = ? WHERE id = ?", (pointer, rnd, cid)
+            )
         else:
             await self.conn.execute(
                 "UPDATE shares SET paid = 1 WHERE collection_id = ? AND user_id = ?", (cid, c["creator_id"])
@@ -265,6 +302,13 @@ class DB:
     async def set_paid(self, cid: int, user_id: int) -> None:
         await self.conn.execute(
             "UPDATE shares SET paid = 1 WHERE collection_id = ? AND user_id = ?", (cid, user_id)
+        )
+        await self.conn.commit()
+
+    async def toggle_paid(self, cid: int, user_id: int) -> None:
+        """В черновике очереди: «уже оплатил в этом круге»."""
+        await self.conn.execute(
+            "UPDATE shares SET paid = 1 - paid WHERE collection_id = ? AND user_id = ?", (cid, user_id)
         )
         await self.conn.commit()
 
@@ -283,16 +327,7 @@ class DB:
 
         owed[user_id] -= 1
         if user_id != current or owed[current] <= 0:
-            pointer += 1
-            while True:
-                while pointer < len(order) and owed[order[pointer]] <= 0:
-                    pointer += 1
-                if pointer < len(order):
-                    break
-                rnd += 1  # новый круг: каждому ещё по одному разу, долги и переплаты сохраняются
-                pointer = 0
-                for u in order:
-                    owed[u] += 1
+            pointer, rnd = next_turn(order, owed, pointer + 1, rnd)
 
         await self.conn.executemany(
             "UPDATE shares SET owed = ? WHERE collection_id = ? AND user_id = ?",

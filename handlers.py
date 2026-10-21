@@ -14,7 +14,10 @@ from aiogram.filters import JOIN_TRANSITION, ChatMemberUpdatedFilter, Command, C
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message, User
+from aiogram.types import (
+    CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, KeyboardButton, KeyboardButtonRequestUsers, Message,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, User,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from db import CONFIRMED, DB, DRAFT, OPEN, CLOSED, PENDING, QUEUE, REJECTED, SPLIT
@@ -37,6 +40,7 @@ class Form(StatesGroup):
     amount = State()
     card = State()
     receipt = State()
+    add_members = State()
 
 
 # ---------- помощники ----------
@@ -97,10 +101,11 @@ async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin:
         kb.button(text=t(lang, "btn_debts"), callback_data=Act(action="debts"))
         sizes = [2]
         if is_admin:
+            kb.button(text=t(lang, "btn_add_member"), callback_data=Act(action="addm"))
             kb.button(text=t(lang, "btn_lang"), callback_data=Act(action="lang"))
-            sizes.append(1)
-        kb.button(text=t(lang, "btn_add_group"), url=f"https://t.me/{me.username}?startgroup=1")
-        kb.adjust(*sizes, 1)
+            kb.button(text=t(lang, "btn_add_group"), url=f"https://t.me/{me.username}?startgroup=1")
+            sizes += [1, 1, 1]
+        kb.adjust(*sizes)
         return t(lang, "menu_private"), kb.as_markup()
 
     kb.button(text=t(lang, "btn_new"), url=await start_link(bot, f"new_{chat_id}"))
@@ -163,9 +168,11 @@ async def render_draft(db: DB, c, lang: str) -> Tuple[str, InlineKeyboardMarkup]
                  amount=fmt_money(c["amount"], cur, lang))
         for i, s in enumerate(shares, 1):
             kb.button(text=f"{i}. {s['name']}"[:40], callback_data=Act(action="tg", cid=cid, uid=s["user_id"]))
+            mark = "✅" if s["paid"] else "⬜"
+            kb.button(text=f"{mark} {t(lang, 'btn_prepaid')}", callback_data=Act(action="prepaid", cid=cid, uid=s["user_id"]))
         for uid in others:
             kb.button(text=f"⬜ {people[uid]}"[:40], callback_data=Act(action="tg", cid=cid, uid=uid))
-        sizes = [1] * len(people)
+        sizes = [2] * len(shares) + [1] * len(others)
         kb.button(text=t(lang, "btn_reset_order"), callback_data=Act(action="reset", cid=cid))
         kb.button(text=t(lang, "btn_currency", cur=t(lang, "cur_" + cur)),
                   callback_data=Act(action="cur", cid=cid, val=other_cur))
@@ -303,6 +310,7 @@ async def apply_payment(db: DB, bot: Bot, c, user_id: int) -> None:
 
 @router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_added(event: ChatMemberUpdated, db: DB, bot: Bot):
+    await db.remember_group(event.chat.id)
     text, markup = await menu_view(bot, await get_lang(db), event.chat.id, event.chat.type, False)
     await try_send(bot, event.chat.id, text, reply_markup=markup)
 
@@ -314,7 +322,7 @@ async def cmd_start_private(message: Message, command: CommandObject, db: DB, la
     args = command.args or ""
     action, _, arg = args.partition("_")
     if action == "new" and arg.lstrip("-").isdigit():
-        await start_new(message, db, lang, state, bot, int(arg))
+        await start_new(message, db, lang, state, bot, int(arg), message.from_user.id == admin_id)
     elif action == "pay" and arg.isdigit():
         await start_pay(message, db, lang, state, int(arg))
     elif args == "card":
@@ -326,7 +334,9 @@ async def cmd_start_private(message: Message, command: CommandObject, db: DB, la
 
 
 @router.message(Command("start", "menu", "help"))
-async def cmd_menu(message: Message, lang: str, bot: Bot, admin_id: Optional[int]):
+async def cmd_menu(message: Message, db: DB, lang: str, bot: Bot, admin_id: Optional[int]):
+    if message.chat.type != "private":
+        await db.remember_group(message.chat.id)
     await show_menu(message, bot, lang, admin_id)
 
 
@@ -407,14 +417,19 @@ async def cb_stop(call: CallbackQuery, lang: str, state: FSMContext):
 @router.callback_query(Act.filter(F.action == "join"))
 async def cb_join(call: CallbackQuery, callback_data: Act, db: DB, lang: str, bot: Bot):
     chat_id = call.message.chat.id
-    name = display_name(call.from_user)
-    added = await db.add_member(chat_id, call.from_user.id, name)
-    for d in await db.chat_collections(chat_id, DRAFT):
-        await db.add_share(d["id"], call.from_user.id, name)
-        await refresh(db, bot, d["id"])
+    added = await add_tenant(db, bot, chat_id, call.from_user.id, display_name(call.from_user))
     await call.answer(t(lang, "joined" if added else "already_joined"))
     if callback_data.val == "m":
         await safe_edit(call.message, *await members_view(db, lang, chat_id))
+
+
+async def add_tenant(db: DB, bot: Bot, chat_id: int, user_id: int, name: str) -> bool:
+    """Добавляет жильца и в открытые черновики этого чата. True — если его раньше не было."""
+    added = await db.add_member(chat_id, user_id, name)
+    for d in await db.chat_collections(chat_id, DRAFT):
+        await db.add_share(d["id"], user_id, name)
+        await refresh(db, bot, d["id"])
+    return added
 
 
 @router.callback_query(Act.filter(F.action == "leave"))
@@ -427,6 +442,79 @@ async def cb_leave(call: CallbackQuery, callback_data: Act, db: DB, lang: str, b
     await call.answer(t(lang, "left" if removed else "not_member"))
     if callback_data.val == "m":
         await safe_edit(call.message, *await members_view(db, lang, chat_id))
+
+
+# ---------- админ добавляет жильцов (в личке) ----------
+
+@router.callback_query(Act.filter(F.action == "addm"))
+async def cb_add_members(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext,
+                         bot: Bot, admin_id: Optional[int]):
+    if call.from_user.id != admin_id:
+        await call.answer(t(lang, "admin_only"), show_alert=True)
+        return
+    await call.answer()
+    if callback_data.cid:
+        await start_add_members(call.message, lang, state, bot, callback_data.cid)
+        return
+
+    groups = []
+    for chat_id in await db.known_groups():
+        try:
+            groups.append(await bot.get_chat(chat_id))
+        except TelegramAPIError:
+            pass  # бота удалили из группы
+    if not groups:
+        await call.message.answer(t(lang, "no_groups"))
+    elif len(groups) == 1:
+        await start_add_members(call.message, lang, state, bot, groups[0].id)
+    else:
+        kb = InlineKeyboardBuilder()
+        for g in groups:
+            kb.button(text=(g.title or str(g.id))[:60], callback_data=Act(action="addm", cid=g.id))
+        kb.adjust(1)
+        await call.message.answer(t(lang, "choose_group"), reply_markup=kb.as_markup())
+
+
+async def start_add_members(message: Message, lang: str, state: FSMContext, bot: Bot, chat_id: int) -> None:
+    try:
+        chat = await bot.get_chat(chat_id)
+    except TelegramAPIError:
+        await message.answer(t(lang, "not_in_group"))
+        return
+
+    await state.set_state(Form.add_members)
+    await state.update_data(chat_id=chat_id, chat_title=chat.title or "")
+    picker = KeyboardButton(
+        text=t(lang, "btn_pick_users"),
+        request_users=KeyboardButtonRequestUsers(
+            request_id=1, user_is_bot=False, max_quantity=10, request_name=True, request_username=True,
+        ),
+    )
+    markup = ReplyKeyboardMarkup(
+        keyboard=[[picker], [KeyboardButton(text=t(lang, "btn_cancel"))]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await message.answer(t(lang, "ask_members", group=esc(chat.title or "")), reply_markup=markup)
+
+
+@router.message(Form.add_members, PRIVATE, F.users_shared)
+async def on_members_shared(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    await state.clear()
+    added = []
+    for u in message.users_shared.users:
+        name = " ".join(filter(None, [u.first_name, u.last_name])) or (u.username and "@" + u.username) or str(u.user_id)
+        if await add_tenant(db, bot, data["chat_id"], u.user_id, name):
+            added.append(esc(name))
+    text = (t(lang, "members_added", group=esc(data["chat_title"]), names=", ".join(added))
+            if added else t(lang, "members_none_new"))
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(Form.add_members, PRIVATE)
+async def on_members_cancel(message: Message, lang: str, state: FSMContext):
+    await state.clear()
+    await message.answer(t(lang, "cancelled"), reply_markup=ReplyKeyboardRemove())
 
 
 # ---------- долги (в личке) ----------
@@ -511,7 +599,8 @@ async def on_card(message: Message, db: DB, lang: str, state: FSMContext, bot: B
 
 # ---------- новый сбор (в личке) ----------
 
-async def start_new(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot, chat_id: int) -> None:
+async def start_new(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot,
+                    chat_id: int, is_admin: bool) -> None:
     try:
         member = await bot.get_chat_member(chat_id, message.from_user.id)
         chat = await bot.get_chat(chat_id)
@@ -521,8 +610,15 @@ async def start_new(message: Message, db: DB, lang: str, state: FSMContext, bot:
         await message.answer(t(lang, "not_in_group"))
         return
 
-    await state.set_state(Form.kind)
     await state.update_data(chat_id=chat_id, chat_title=chat.title or "")
+    if not is_admin:
+        # Очередь создаёт только админ бота, остальным сразу «поделить сумму».
+        await state.update_data(kind=SPLIT)
+        await state.set_state(Form.amount)
+        await message.answer(t(lang, "ask_amount_split"), reply_markup=cancel_kb(lang))
+        return
+
+    await state.set_state(Form.kind)
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_kind_split"), callback_data=Act(action="kind", val=SPLIT))
     kb.button(text=t(lang, "btn_kind_queue"), callback_data=Act(action="kind", val=QUEUE))
@@ -532,7 +628,10 @@ async def start_new(message: Message, db: DB, lang: str, state: FSMContext, bot:
 
 
 @router.callback_query(Form.kind, Act.filter(F.action == "kind"))
-async def cb_kind(call: CallbackQuery, callback_data: Act, lang: str, state: FSMContext):
+async def cb_kind(call: CallbackQuery, callback_data: Act, lang: str, state: FSMContext, admin_id: Optional[int]):
+    if callback_data.val == QUEUE and call.from_user.id != admin_id:
+        await call.answer(t(lang, "queue_admin_only"), show_alert=True)
+        return
     await state.update_data(kind=callback_data.val)
     await state.set_state(Form.amount)
     await call.answer()
@@ -568,6 +667,16 @@ async def cb_toggle_member(call: CallbackQuery, callback_data: Act, db: DB, lang
     if not await db.remove_share(c["id"], uid):
         members = {m["user_id"]: m["name"] for m in await db.get_members(c["chat_id"])}
         await db.add_share(c["id"], uid, members.get(uid, str(uid)))
+    await call.answer()
+    await refresh(db, bot, c["id"])
+
+
+@router.callback_query(Act.filter(F.action == "prepaid"))
+async def cb_prepaid(call: CallbackQuery, callback_data: Act, db: DB, lang: str, bot: Bot):
+    c = await creator_only(call, db, callback_data.cid, lang, DRAFT)
+    if not c:
+        return
+    await db.toggle_paid(c["id"], callback_data.uid)
     await call.answer()
     await refresh(db, bot, c["id"])
 
