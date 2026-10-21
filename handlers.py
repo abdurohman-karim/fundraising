@@ -16,7 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, KeyboardButton, KeyboardButtonRequestUsers, Message,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove, User,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove, ReplyParameters, User,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -274,10 +274,19 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
 
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_pay"), url=await start_link(bot, f"pay_{cid}"))
-    kb.button(text=t(lang, "btn_remind"), callback_data=Act(action="remind", cid=cid))
-    kb.button(text=t(lang, "btn_close"), callback_data=Act(action="close", cid=cid))
-    kb.adjust(1, 2)
     return "\n".join(lines), kb.as_markup()
+
+
+def manage_kb(lang: str, cid: int, back: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки автора сбора — только в его личке."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(lang, "btn_remind"), callback_data=Act(action="remind", cid=cid))
+    kb.button(text=t(lang, "btn_edit"), callback_data=Act(action="edit", cid=cid))
+    kb.button(text=t(lang, "btn_close"), callback_data=Act(action="close", cid=cid))
+    if back:
+        kb.button(text=t(lang, "btn_back"), callback_data=Act(action="mine", val="e"))
+    kb.adjust(3, 1)
+    return kb.as_markup()
 
 
 async def refresh(db: DB, bot: Bot, cid: int) -> None:
@@ -776,10 +785,8 @@ async def cb_create(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
         return
     await db.set_message_id(c["id"], sent.message_id)
     await call.answer()
-    kb = InlineKeyboardBuilder()
-    kb.button(text=t(lang, "btn_edit"), callback_data=Act(action="edit", cid=c["id"]))
     await safe_edit(call.message, t(lang, "draft_published", title=esc(c["title"]), group=esc(c["chat_title"])),
-                    kb.as_markup())
+                    manage_kb(lang, c["id"]))
 
 
 @router.callback_query(Act.filter(F.action == "cancel"))
@@ -795,19 +802,30 @@ async def cb_cancel(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
 # ---------- изменение названия (в личке) ----------
 
 @router.callback_query(Act.filter(F.action == "mine"))
-async def cb_mine(call: CallbackQuery, db: DB, lang: str):
-    """Открытые сборы автора — отсюда их можно переименовать."""
+async def cb_mine(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
+    """Открытые сборы автора. val="e" — вернуться к списку в том же сообщении."""
     await call.answer()
     items = [c for c in await db.creator_active(call.from_user.id) if c["status"] == OPEN]
-    if not items:
-        await call.message.answer(t(lang, "mine_empty"))
-        return
     kb = InlineKeyboardBuilder()
     for c in items:
         icon = "🔁" if c["kind"] == QUEUE else "💰"
-        kb.button(text=f"✏️ {icon} {c['title']}"[:60], callback_data=Act(action="edit", cid=c["id"]))
+        kb.button(text=f"{icon} {c['title']}"[:60], callback_data=Act(action="manage", cid=c["id"]))
     kb.adjust(1)
-    await call.message.answer(t(lang, "mine_title"), reply_markup=kb.as_markup())
+    text = t(lang, "mine_title" if items else "mine_empty")
+    if callback_data.val == "e":
+        await safe_edit(call.message, text, kb.as_markup())
+    else:
+        await call.message.answer(text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(Act.filter(F.action == "manage"))
+async def cb_manage(call: CallbackQuery, callback_data: Act, db: DB, lang: str, bot: Bot):
+    c = await creator_only(call, db, callback_data.cid, lang, OPEN)
+    if not c:
+        return
+    await call.answer()
+    text, _ = await render(db, bot, c["id"])
+    await safe_edit(call.message, text, manage_kb(lang, c["id"], back=True))
 
 
 @router.callback_query(Act.filter(F.action == "edit"))
@@ -967,15 +985,14 @@ async def cb_receipt(call: CallbackQuery, callback_data: Act, db: DB, lang: str,
         pass
 
 
-# ---------- открытый сбор (кнопки в группе) ----------
+# ---------- кнопки автора: напомнить и закрыть (в личке) ----------
 
 @router.callback_query(Act.filter(F.action == "remind"))
-async def cb_remind(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
+async def cb_remind(call: CallbackQuery, callback_data: Act, db: DB, lang: str, bot: Bot):
     c = await creator_only(call, db, callback_data.cid, lang, OPEN)
     if not c:
         return
     shares = await db.get_shares(c["id"])
-    await call.answer()
     if c["kind"] == QUEUE:
         s = shares[c["pointer"]]
         text = t(lang, "remind_queue", name=mention(s["user_id"], s["name"]), title=esc(c["title"]),
@@ -983,9 +1000,15 @@ async def cb_remind(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
     else:
         pending = await db.pending_users(c["id"])
         debtors = [s for s in shares if not s["paid"] and s["user_id"] not in pending]
+        if not debtors:
+            await call.answer(t(lang, "nobody_to_remind"), show_alert=True)
+            return
         text = t(lang, "remind", title=esc(c["title"]), share=fmt_money(c["share"], c["currency"], lang),
                  people=", ".join(mention(s["user_id"], s["name"]) for s in debtors))
-    await call.message.reply(text)
+    # Напоминание — в группу, ответом на карточку сбора.
+    reply = ReplyParameters(message_id=c["message_id"], allow_sending_without_reply=True) if c["message_id"] else None
+    sent = await try_send(bot, c["chat_id"], text, reply_parameters=reply)
+    await call.answer(t(lang, "reminded" if sent else "publish_failed"), show_alert=not sent)
 
 
 @router.callback_query(Act.filter(F.action == "close"))
@@ -996,3 +1019,8 @@ async def cb_close(call: CallbackQuery, callback_data: Act, db: DB, lang: str, b
     await db.set_status(c["id"], CLOSED)
     await call.answer(t(lang, "closed_ok"))
     await refresh(db, bot, c["id"])
+    if call.message.chat.type == "private":
+        text, _ = await render(db, bot, c["id"])
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_back"), callback_data=Act(action="mine", val="e"))
+        await safe_edit(call.message, text, kb.as_markup())
