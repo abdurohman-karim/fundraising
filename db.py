@@ -380,6 +380,13 @@ class DB:
         cur = await self.conn.execute("SELECT id FROM collections WHERE status = ?", (OPEN,))
         return [row["id"] for row in await cur.fetchall()]
 
+    async def is_draft_message(self, user_id: int, message_id: int) -> bool:
+        cur = await self.conn.execute(
+            "SELECT 1 FROM collections WHERE status = ? AND creator_id = ? AND message_id = ?",
+            (DRAFT, user_id, message_id),
+        )
+        return await cur.fetchone() is not None
+
     async def creator_active(self, user_id: int) -> List[aiosqlite.Row]:
         """Черновики и открытые сборы этого автора."""
         cur = await self.conn.execute(

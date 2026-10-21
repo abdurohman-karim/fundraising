@@ -121,7 +121,7 @@ TEXTS = {
         "per_person": "Участников: {n} · с каждого: <b>{share}</b>",
         "payer_mark": "платил(а)",
         "collected": "Собрано: {paid}/{n} · {sum} из {total}",
-        "all_paid": "🎉 Все оплатили «{title}». Сбор закрыт.",
+        "closed_all_paid": "🎉 <b>Все оплатили — сбор закрыт</b>",
         "remind": "🔔 Напоминание по сбору «{title}» — по <b>{share}</b>:\n{people}",
         # --- карточка: очередь ---
         "queue_head": "🔁 <b>{title}</b> — по очереди\nКаждый раз: <b>{amount}</b> · круг {round}",
@@ -280,7 +280,7 @@ TEXTS = {
         "per_person": "Ishtirokchilar: {n} · har biridan: <b>{share}</b>",
         "payer_mark": "to'lagan",
         "collected": "Yig'ildi: {paid}/{n} · {sum} / {total}",
-        "all_paid": "🎉 «{title}» uchun hamma to'ladi. Yig'im yopildi.",
+        "closed_all_paid": "🎉 <b>Hamma to'ladi — yig'im yopildi</b>",
         "remind": "🔔 «{title}» yig'imi bo'yicha eslatma — har biridan <b>{share}</b>:\n{people}",
         # --- kartochka: navbat ---
         "queue_head": "🔁 <b>{title}</b> — navbat bilan\nHar safar: <b>{amount}</b> · {round}-aylana",
