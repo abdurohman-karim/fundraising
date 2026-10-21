@@ -182,6 +182,28 @@ class DB:
         await self.conn.commit()
         return cur.rowcount > 0
 
+    async def stored_name(self, user_id: int) -> Optional[str]:
+        cur = await self.conn.execute("SELECT name FROM members WHERE user_id = ? LIMIT 1", (user_id,))
+        row = await cur.fetchone()
+        return row["name"] if row else None
+
+    async def rename_user(self, user_id: int, name: str) -> List[int]:
+        """Меняет имя человека везде. Возвращает открытые сборы, где он есть, — их надо перерисовать."""
+        await self.conn.execute("UPDATE members SET name = ? WHERE user_id = ?", (name, user_id))
+        await self.conn.execute("UPDATE shares SET name = ? WHERE user_id = ?", (name, user_id))
+        await self.conn.execute("UPDATE collections SET creator_name = ? WHERE creator_id = ?", (name, user_id))
+        await self.conn.commit()
+        cur = await self.conn.execute(
+            "SELECT DISTINCT c.id FROM collections c LEFT JOIN shares s ON s.collection_id = c.id "
+            "WHERE c.status IN (?, ?) AND (s.user_id = ? OR c.creator_id = ?)",
+            (DRAFT, OPEN, user_id, user_id),
+        )
+        return [row["id"] for row in await cur.fetchall()]
+
+    async def all_members(self) -> List[aiosqlite.Row]:
+        cur = await self.conn.execute("SELECT chat_id, user_id, name FROM members")
+        return list(await cur.fetchall())
+
     async def get_members(self, chat_id: int) -> List[aiosqlite.Row]:
         cur = await self.conn.execute(
             "SELECT user_id, name FROM members WHERE chat_id = ? ORDER BY name", (chat_id,)

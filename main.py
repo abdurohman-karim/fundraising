@@ -10,12 +10,12 @@ from aiogram.types import BotCommand, TelegramObject
 from dotenv import load_dotenv
 
 from db import DB
-from handlers import refresh_open, router
+from handlers import refresh_open, router, sync_names, sync_user
 from i18n import DEFAULT_LANG
 
 
 class LangMiddleware(BaseMiddleware):
-    """Кладёт язык бота в аргумент `lang` обработчиков."""
+    """Кладёт язык бота в аргумент `lang` обработчиков и следит, чтобы имена жильцов были актуальны."""
 
     async def __call__(
         self,
@@ -24,6 +24,9 @@ class LangMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         data["lang"] = await data["db"].get_lang() or DEFAULT_LANG
+        user = data.get("event_from_user")
+        if user and not user.is_bot:
+            await sync_user(data["db"], data["bot"], user)
         return await handler(event, data)
 
 
@@ -48,6 +51,7 @@ async def main() -> None:
     dp.include_router(router)
 
     await bot.set_my_commands([BotCommand(command="menu", description="Меню / Menyu")])
+    await sync_names(db, bot)
     await refresh_open(db, bot)
     try:
         await dp.start_polling(bot)

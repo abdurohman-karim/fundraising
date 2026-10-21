@@ -47,7 +47,8 @@ class Form(StatesGroup):
 # ---------- помощники ----------
 
 def display_name(user: User) -> str:
-    return user.full_name or (user.username and "@" + user.username) or str(user.id)
+    """@username, а если его нет — имя."""
+    return f"@{user.username}" if user.username else (user.full_name or str(user.id))
 
 
 async def get_lang(db: DB) -> str:
@@ -292,6 +293,32 @@ async def refresh(db: DB, bot: Bot, cid: int) -> None:
         pass  # сообщение не изменилось или удалено
 
 
+async def sync_user(db: DB, bot: Bot, user: User) -> None:
+    """Если человек сменил имя или @username — обновляем его везде и перерисовываем его сборы."""
+    stored = await db.stored_name(user.id)
+    name = display_name(user)
+    if stored is None or stored == name:
+        return
+    for cid in await db.rename_user(user.id, name):
+        await refresh(db, bot, cid)
+
+
+async def sync_names(db: DB, bot: Bot) -> None:
+    """При запуске сверяет имена всех жильцов с Telegram."""
+    seen = set()
+    for m in await db.all_members():
+        if m["user_id"] in seen:
+            continue
+        try:
+            member = await bot.get_chat_member(m["chat_id"], m["user_id"])
+        except TelegramAPIError:
+            continue  # человек вышел из группы или бот потерял доступ
+        seen.add(m["user_id"])
+        name = display_name(member.user)
+        if name != m["name"]:
+            await db.rename_user(m["user_id"], name)
+
+
 async def refresh_open(db: DB, bot: Bot) -> None:
     """При запуске перерисовывает открытые карточки — чтобы после обновления бота у них были новые кнопки."""
     for cid in await db.open_ids():
@@ -522,7 +549,7 @@ async def on_members_shared(message: Message, db: DB, lang: str, state: FSMConte
     await state.clear()
     added = []
     for u in message.users_shared.users:
-        name = " ".join(filter(None, [u.first_name, u.last_name])) or (u.username and "@" + u.username) or str(u.user_id)
+        name = f"@{u.username}" if u.username else (" ".join(filter(None, [u.first_name, u.last_name])) or str(u.user_id))
         if await add_tenant(db, bot, data["chat_id"], u.user_id, name):
             added.append(esc(name))
     text = (t(lang, "members_added", group=esc(data["chat_title"]), names=", ".join(added))
