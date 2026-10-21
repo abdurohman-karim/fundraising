@@ -186,10 +186,18 @@ async def render_draft(db: DB, c, lang: str) -> Tuple[str, InlineKeyboardMarkup]
             "",
             card_text(lang, card) if card else t(lang, "no_card_line", name=esc(c["creator_name"])),
         ])
+        paid = {s["user_id"]: s["paid"] for s in shares}
+        sizes = []
         for uid in sorted(people, key=lambda u: people[u].lower()):
             mark = "✅" if uid in selected else "⬜"
             kb.button(text=f"{mark} {people[uid]}"[:40], callback_data=Act(action="tg", cid=cid, uid=uid))
-        sizes = [2] * (len(people) // 2) + [1] * (len(people) % 2)
+            if uid in selected and uid != c["creator_id"]:
+                # Уже отдал свою долю (например, наличными): в делении участвует, платить не нужно.
+                mark = "✅" if paid[uid] else "⬜"
+                kb.button(text=f"{mark} {t(lang, 'btn_prepaid')}", callback_data=Act(action="prepaid", cid=cid, uid=uid))
+                sizes.append(2)
+            else:
+                sizes.append(1)
         kb.button(text=t(lang, "btn_currency", cur=t(lang, "cur_" + cur)),
                   callback_data=Act(action="cur", cid=cid, val=other_cur))
         sizes.append(1)
@@ -716,7 +724,7 @@ async def cb_create(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
             return
         share = c["amount"]
     else:
-        if not any(s["user_id"] != c["creator_id"] for s in shares):
+        if not any(s["user_id"] != c["creator_id"] and not s["paid"] for s in shares):
             await call.answer(t(lang, "need_people"), show_alert=True)
             return
         share = split_share(c["amount"], c["currency"], len(shares))

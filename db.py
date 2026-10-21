@@ -306,7 +306,7 @@ class DB:
         await self.conn.commit()
 
     async def toggle_paid(self, cid: int, user_id: int) -> None:
-        """В черновике очереди: «уже оплатил в этом круге»."""
+        """В черновике: «уже оплатил» (сбор — уже отдал долю, очередь — уже платил в этом круге)."""
         await self.conn.execute(
             "UPDATE shares SET paid = 1 - paid WHERE collection_id = ? AND user_id = ?", (cid, user_id)
         )

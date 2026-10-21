@@ -89,7 +89,9 @@ TEXTS = {
             "📝 <b>Новый сбор</b> · {group}\n"
             "{title} — {amount}\n"
             "Участников: {n} · с каждого: <b>{share}</b>\n\n"
-            "Отметьте, кто участвует, и нажмите «Создать». "
+            "Отметьте, кто участвует, и нажмите «Создать».\n"
+            "«✅ уже оплатил» — человек уже отдал свою долю (например, наличными): "
+            "сумма делится и на него, но платить ему не нужно.\n"
             "Если кого-то нет в списке — пусть нажмёт «🙋 Я в доле» в группе."
         ),
         "draft_queue": (
@@ -102,7 +104,7 @@ TEXTS = {
         ),
         "draft_published": "✅ «{title}» опубликован в группе «{group}»",
         "publish_failed": "Не получилось отправить в группу — бот всё ещё в ней?",
-        "need_people": "Отметьте хотя бы одного участника кроме себя",
+        "need_people": "Нужен хотя бы один участник кроме вас, который ещё не заплатил",
         "need_queue": "В очереди должно быть хотя бы 2 человека",
         "queue_admin_only": "Очередь может создать только администратор бота",
         "only_creator": "Это может сделать только автор сбора",
@@ -238,7 +240,9 @@ TEXTS = {
             "📝 <b>Yangi yig'im</b> · {group}\n"
             "{title} — {amount}\n"
             "Ishtirokchilar: {n} · har biridan: <b>{share}</b>\n\n"
-            "Kim qatnashishini belgilang va «Yaratish» ni bosing. "
+            "Kim qatnashishini belgilang va «Yaratish» ni bosing.\n"
+            "«✅ to'lagan» — bu odam o'z ulushini allaqachon bergan (masalan, naqd): "
+            "summa unga ham bo'linadi, lekin u to'lamaydi.\n"
             "Ro'yxatda yo'q odam guruhda «🙋 Men ham» ni bossin."
         ),
         "draft_queue": (
@@ -251,7 +255,7 @@ TEXTS = {
         ),
         "draft_published": "✅ «{title}» «{group}» guruhida e'lon qilindi",
         "publish_failed": "Guruhga yuborib bo'lmadi — bot hali guruhdami?",
-        "need_people": "O'zingizdan tashqari kamida bitta ishtirokchini belgilang",
+        "need_people": "Sizdan tashqari hali to'lamagan kamida bitta ishtirokchi kerak",
         "need_queue": "Navbatda kamida 2 kishi bo'lishi kerak",
         "queue_admin_only": "Navbatni faqat bot administratori yaratadi",
         "only_creator": "Buni faqat yig'im muallifi qila oladi",
