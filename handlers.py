@@ -1025,6 +1025,7 @@ async def start_pay(chat_id: int, user_id: int, db: DB, lang: str, state: FSMCon
         return
 
     cur = c["currency"]
+    kb = InlineKeyboardBuilder()
     if c["kind"] == QUEUE:
         text = t(lang, "pay_queue", title=esc(c["title"]), amount=fmt_money(c["amount"], cur, lang))
     else:
@@ -1032,10 +1033,44 @@ async def start_pay(chat_id: int, user_id: int, db: DB, lang: str, state: FSMCon
         text = t(lang, "pay_split", title=esc(c["title"]), amount=fmt_money(c["share"], cur, lang),
                  creator=esc(c["creator_name"]),
                  card=card_text(lang, card) if card else t(lang, "no_card_line", name=esc(c["creator_name"])))
+        text += t(lang, "pay_cash_hint")
+        kb.button(text=t(lang, "btn_cash"), callback_data=Act(action="cash", cid=cid))
+    kb.button(text=t(lang, "btn_cancel"), callback_data=Act(action="menu"))
+    kb.adjust(1)
 
-    await show(bot, db, chat_id, text, back_kb(lang, cancel=True), new=True)
+    await show(bot, db, chat_id, text, kb.as_markup(), new=True)
     await state.set_state(Form.receipt)
     await state.update_data(cid=cid, prompt=text)
+
+
+@router.callback_query(Act.filter(F.action == "cash"))
+async def cb_cash(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext, bot: Bot):
+    """Отдал долю наличными: без чека и без подтверждения, автору — просто уведомление."""
+    c = await db.get_collection(callback_data.cid)
+    user = call.from_user
+    shares = {s["user_id"]: s for s in await db.get_shares(c["id"])} if c else {}
+    if not c or c["status"] != OPEN or c["kind"] != SPLIT:
+        error = "already_closed"
+    elif user.id not in shares or user.id == c["creator_id"]:
+        error = "not_participant"
+    elif shares[user.id]["paid"]:
+        error = "already_paid"
+    elif user.id in await db.pending_users(c["id"]):
+        error = "already_pending"
+    else:
+        error = None
+    if error:
+        await call.answer(t(lang, error), show_alert=True)
+        return
+
+    await state.clear()
+    name = display_name(user)
+    await db.add_payment(c["id"], user.id, name, "", "cash", CONFIRMED)
+    await apply_payment(db, bot, c, user.id)
+    await call.answer()
+    await safe_edit(call.message, t(lang, "cash_saved"), back_kb(lang))
+    await try_send(bot, c["creator_id"], t(lang, "cash_notice", name=esc(name), title=esc(c["title"]),
+                                           amount=fmt_money(c["share"], c["currency"], lang)))
 
 
 async def send_receipt(bot: Bot, chat_id: int, file_type: str, file_id: str, caption: str,
