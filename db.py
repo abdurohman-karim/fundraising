@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import aiosqlite
 
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS shares (
     paid          INTEGER NOT NULL DEFAULT 0,  -- split: доля оплачена
     pos           INTEGER NOT NULL DEFAULT 0,  -- queue: место в очереди
     owed          INTEGER NOT NULL DEFAULT 0,  -- queue: сколько раз должен заплатить в этом круге
+    paid_by       INTEGER,                     -- split: кто оплатил эту долю, если не сам человек
     PRIMARY KEY (collection_id, user_id)
 );
 
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS payments (
     name          TEXT    NOT NULL,
     file_id       TEXT    NOT NULL,
     file_type     TEXT    NOT NULL,
+    covers        TEXT    NOT NULL DEFAULT '',  -- за кого ещё платит (id через запятую)
     status        TEXT    NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL
 );
@@ -83,7 +85,13 @@ MIGRATIONS = [
     ("collections", "round", "INTEGER NOT NULL DEFAULT 1"),
     ("shares", "pos", "INTEGER NOT NULL DEFAULT 0"),
     ("shares", "owed", "INTEGER NOT NULL DEFAULT 0"),
+    ("shares", "paid_by", "INTEGER"),
+    ("payments", "covers", "TEXT NOT NULL DEFAULT ''"),
 ]
+
+
+def parse_covers(text: str) -> List[int]:
+    return [int(x) for x in (text or "").split(",") if x]
 
 
 def next_turn(order: List[int], owed: Dict[int, int], pointer: int, rnd: int) -> Tuple[int, int]:
@@ -261,7 +269,7 @@ class DB:
     async def get_shares(self, cid: int) -> List[aiosqlite.Row]:
         """Для очереди — по порядку очереди, для сбора — оплатившие сверху."""
         cur = await self.conn.execute(
-            "SELECT s.user_id, s.name, s.paid, s.pos, s.owed FROM shares s "
+            "SELECT s.user_id, s.name, s.paid, s.pos, s.owed, s.paid_by FROM shares s "
             "JOIN collections c ON c.id = s.collection_id WHERE s.collection_id = ? "
             "ORDER BY CASE c.kind WHEN 'queue' THEN s.pos ELSE -s.paid END, s.name",
             (cid,),
@@ -325,9 +333,11 @@ class DB:
         await self.conn.execute("DELETE FROM collections WHERE id = ?", (cid,))
         await self.conn.commit()
 
-    async def set_paid(self, cid: int, user_id: int) -> None:
+    async def set_paid(self, cid: int, user_id: int, paid_by: Optional[int] = None) -> None:
+        """Отмечает долю оплаченной; paid_by — если за человека заплатил другой участник."""
         await self.conn.execute(
-            "UPDATE shares SET paid = 1 WHERE collection_id = ? AND user_id = ?", (cid, user_id)
+            "UPDATE shares SET paid = 1, paid_by = ? WHERE collection_id = ? AND user_id = ? AND paid = 0",
+            (paid_by, cid, user_id),
         )
         await self.conn.commit()
 
@@ -406,11 +416,12 @@ class DB:
 
     # --- чеки ---
 
-    async def add_payment(self, cid: int, user_id: int, name: str, file_id: str, file_type: str, status: str) -> int:
+    async def add_payment(self, cid: int, user_id: int, name: str, file_id: str, file_type: str, status: str,
+                          covers: Sequence[int] = ()) -> int:
         cur = await self.conn.execute(
-            "INSERT INTO payments (collection_id, user_id, name, file_id, file_type, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (cid, user_id, name, file_id, file_type, status, int(time.time())),
+            "INSERT INTO payments (collection_id, user_id, name, file_id, file_type, status, covers, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (cid, user_id, name, file_id, file_type, status, ",".join(map(str, covers)), int(time.time())),
         )
         await self.conn.commit()
         return cur.lastrowid
@@ -424,7 +435,12 @@ class DB:
         await self.conn.commit()
 
     async def pending_users(self, cid: int) -> Set[int]:
+        """Чьи доли сейчас на проверке: и сам плательщик, и те, за кого он платит."""
         cur = await self.conn.execute(
-            "SELECT user_id FROM payments WHERE collection_id = ? AND status = ?", (cid, PENDING)
+            "SELECT user_id, covers FROM payments WHERE collection_id = ? AND status = ?", (cid, PENDING)
         )
-        return {row["user_id"] for row in await cur.fetchall()}
+        users = set()
+        for row in await cur.fetchall():
+            users.add(row["user_id"])
+            users.update(parse_covers(row["covers"]))
+        return users

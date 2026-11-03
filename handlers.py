@@ -23,7 +23,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from db import CONFIRMED, DB, DRAFT, OPEN, CLOSED, PENDING, QUEUE, REJECTED, SPLIT
+from db import CONFIRMED, DB, DRAFT, OPEN, CLOSED, PENDING, QUEUE, REJECTED, SPLIT, parse_covers
 from i18n import CHOOSE_LANG, DEFAULT_LANG, t
 from utils import USD, UZS, card_type, esc, fmt_card, fmt_money, mention, parse_amount, parse_card, split_share
 
@@ -342,6 +342,7 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
         all_paid = False
     else:
         share = c["share"]
+        names = {s["user_id"]: s["name"] for s in shares}
         paid = sum(1 for s in shares if s["paid"])
         all_paid = paid == len(shares)
         card = await db.get_card(c["creator_id"])
@@ -358,7 +359,9 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
                 lines.append(f"💳 {esc(s['name'])} — {t(lang, 'payer_mark')}")
             else:
                 mark = "✅" if s["paid"] else ("🕓" if s["user_id"] in pending else "⏳")
-                lines.append(f"{mark} {esc(s['name'])}")
+                by = names.get(s["paid_by"]) if s["paid_by"] and s["paid_by"] != s["user_id"] else None
+                tail = f" ← {t(lang, 'covered_by', name=esc(by))}" if by else ""
+                lines.append(f"{mark} {esc(s['name'])}{tail}")
         collected = min(paid * share, c["amount"])
         lines += ["", t(lang, "collected", paid=paid, n=len(shares),
                         sum=fmt_money(collected, cur, lang), total=fmt_money(c["amount"], cur, lang))]
@@ -372,14 +375,18 @@ async def render(db: DB, bot: Bot, cid: int) -> Tuple[str, Optional[InlineKeyboa
     return "\n".join(lines), kb.as_markup()
 
 
-def manage_kb(lang: str, cid: int) -> InlineKeyboardMarkup:
+def manage_kb(lang: str, cid: int, kind: str = SPLIT) -> InlineKeyboardMarkup:
     """Кнопки автора сбора — только в его личке."""
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_remind"), callback_data=Act(action="remind", cid=cid))
     kb.button(text=t(lang, "btn_edit"), callback_data=Act(action="edit", cid=cid))
     kb.button(text=t(lang, "btn_close"), callback_data=Act(action="close", cid=cid))
+    sizes = [3]
+    if kind == SPLIT:
+        kb.button(text=t(lang, "btn_attach"), callback_data=Act(action="att", cid=cid))
+        sizes.append(1)
     kb.button(text=t(lang, "btn_back"), callback_data=Act(action="mine"))
-    kb.adjust(3, 1)
+    kb.adjust(*sizes, 1)
     return kb.as_markup()
 
 
@@ -440,12 +447,14 @@ async def creator_only(call: CallbackQuery, db: DB, cid: int, lang: str, status:
     return c
 
 
-async def apply_payment(db: DB, bot: Bot, c, user_id: int) -> None:
-    """Засчитывает подтверждённый платёж."""
+async def apply_payment(db: DB, bot: Bot, c, user_id: int, covers=()) -> None:
+    """Засчитывает подтверждённый платёж; covers — за кого ещё заплатил этот человек."""
     if c["kind"] == QUEUE:
         await db.queue_pay(c["id"], user_id)
     else:
         await db.set_paid(c["id"], user_id)
+        for other in covers:
+            await db.set_paid(c["id"], other, paid_by=user_id)
         if all(s["paid"] for s in await db.get_shares(c["id"])):
             await db.set_status(c["id"], CLOSED)  # на карточке появится «Все оплатили»
     await refresh(db, bot, c["id"])
@@ -892,7 +901,7 @@ async def cb_create(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
     await db.set_message_id(c["id"], sent.message_id)
     await call.answer()
     await safe_edit(call.message, t(lang, "draft_published", title=esc(c["title"]), group=esc(c["chat_title"])),
-                    manage_kb(lang, c["id"]))
+                    manage_kb(lang, c["id"], c["kind"]))
 
 
 @router.callback_query(Act.filter(F.action == "cancel"))
@@ -923,7 +932,7 @@ async def cb_manage(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
         return
     await call.answer()
     text, _ = await render(db, bot, c["id"])
-    await safe_edit(call.message, text, manage_kb(lang, c["id"]))
+    await safe_edit(call.message, text, manage_kb(lang, c["id"], c["kind"]))
 
 
 @router.callback_query(Act.filter(F.action == "edit"))
@@ -963,7 +972,8 @@ async def on_title(message: Message, db: DB, lang: str, state: FSMContext, bot: 
     await refresh(db, bot, c["id"])  # черновик перерисуется на месте, карточка — в группе
     if c["status"] == OPEN:
         text, _ = await render(db, bot, c["id"])
-        await show(bot, db, chat_id, f"{t(lang, 'title_saved', title=esc(title))}\n\n{text}", manage_kb(lang, c["id"]))
+        await show(bot, db, chat_id, f"{t(lang, 'title_saved', title=esc(title))}\n\n{text}",
+                   manage_kb(lang, c["id"], c["kind"]))
 
 
 @router.callback_query(Act.filter(F.action == "remind"))
@@ -1024,23 +1034,103 @@ async def start_pay(chat_id: int, user_id: int, db: DB, lang: str, state: FSMCon
         await show(bot, db, chat_id, t(lang, error), back_kb(lang), new=True)
         return
 
+    text, markup = await pay_view(db, lang, c, [])
+    await show(bot, db, chat_id, text, markup, new=True)
+    await state.set_state(Form.receipt)
+    await state.update_data(cid=cid, prompt=text, covers=[])
+
+
+async def pay_view(db: DB, lang: str, c, covers) -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран оплаты; covers — за кого человек платит вместе со своей долей."""
     cur = c["currency"]
     kb = InlineKeyboardBuilder()
     if c["kind"] == QUEUE:
         text = t(lang, "pay_queue", title=esc(c["title"]), amount=fmt_money(c["amount"], cur, lang))
     else:
+        names = {s["user_id"]: s["name"] for s in await db.get_shares(c["id"])}
         card = await db.get_card(c["creator_id"])
         text = t(lang, "pay_split", title=esc(c["title"]), amount=fmt_money(c["share"], cur, lang),
                  creator=esc(c["creator_name"]),
                  card=card_text(lang, card) if card else t(lang, "no_card_line", name=esc(c["creator_name"])))
+        if covers:
+            text += t(lang, "pay_for", names=", ".join(esc(names[u]) for u in covers),
+                      total=fmt_money(c["share"] * (1 + len(covers)), cur, lang))
         text += t(lang, "pay_cash_hint")
-        kb.button(text=t(lang, "btn_cash"), callback_data=Act(action="cash", cid=cid))
+        kb.button(text=t(lang, "btn_cover"), callback_data=Act(action="covlist", cid=c["id"]))
+        kb.button(text=t(lang, "btn_cash"), callback_data=Act(action="cash", cid=c["id"]))
     kb.button(text=t(lang, "btn_cancel"), callback_data=Act(action="menu"))
     kb.adjust(1)
+    return text, kb.as_markup()
 
-    await show(bot, db, chat_id, text, kb.as_markup(), new=True)
-    await state.set_state(Form.receipt)
-    await state.update_data(cid=cid, prompt=text)
+
+async def cover_candidates(db: DB, c, user_id: int):
+    """За кого можно заплатить: ещё не оплатившие, кроме себя и автора."""
+    pending = await db.pending_users(c["id"])
+    return [s for s in await db.get_shares(c["id"])
+            if not s["paid"] and s["user_id"] not in (user_id, c["creator_id"]) and s["user_id"] not in pending]
+
+
+async def pay_state(call: CallbackQuery, db: DB, lang: str, state: FSMContext, cid: int):
+    """Сбор и данные экрана оплаты, если человек сейчас на нём."""
+    data = await state.get_data()
+    c = await db.get_collection(cid)
+    if await state.get_state() != Form.receipt.state or data.get("cid") != cid or not c or c["status"] != OPEN:
+        await call.answer(t(lang, "already_handled"))
+        return None, None
+    return c, data
+
+
+@router.callback_query(Act.filter(F.action == "covlist"))
+async def cb_cover_list(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext):
+    c, data = await pay_state(call, db, lang, state, callback_data.cid)
+    if not c:
+        return
+    candidates = await cover_candidates(db, c, call.from_user.id)
+    if not candidates:
+        await call.answer(t(lang, "no_one_to_cover"), show_alert=True)
+        return
+    await call.answer()
+    covers = data.get("covers", [])
+    kb = InlineKeyboardBuilder()
+    for s in candidates:
+        mark = "✅" if s["user_id"] in covers else "⬜"
+        kb.button(text=f"{mark} {s['name']}"[:40], callback_data=Act(action="cov", cid=c["id"], uid=s["user_id"]))
+    kb.button(text=t(lang, "btn_done"), callback_data=Act(action="payback", cid=c["id"]))
+    kb.adjust(1)
+    await safe_edit(call.message, t(lang, "cover_title"), kb.as_markup())
+
+
+@router.callback_query(Act.filter(F.action == "cov"))
+async def cb_cover_toggle(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext):
+    c, data = await pay_state(call, db, lang, state, callback_data.cid)
+    if not c:
+        return
+    covers = list(data.get("covers", []))
+    if callback_data.uid in covers:
+        covers.remove(callback_data.uid)
+    else:
+        covers.append(callback_data.uid)
+    await state.update_data(covers=covers)
+    await cb_cover_list(call, callback_data, db, lang, state)
+
+
+@router.callback_query(Act.filter(F.action == "payback"))
+async def cb_pay_back(call: CallbackQuery, callback_data: Act, db: DB, lang: str, state: FSMContext):
+    c, data = await pay_state(call, db, lang, state, callback_data.cid)
+    if not c:
+        return
+    await call.answer()
+    # Кто-то мог успеть заплатить сам — оставляем только тех, за кого ещё можно платить.
+    allowed = {s["user_id"] for s in await cover_candidates(db, c, call.from_user.id)}
+    covers = [u for u in data.get("covers", []) if u in allowed]
+    text, markup = await pay_view(db, lang, c, covers)
+    await state.update_data(covers=covers, prompt=text)
+    await safe_edit(call.message, text, markup)
+
+
+async def notify_covered(bot: Bot, lang: str, c, payer: str, covers) -> None:
+    for other in covers:
+        await try_send(bot, other, t(lang, "covered_notice", payer=esc(payer), title=esc(c["title"])))
 
 
 @router.callback_query(Act.filter(F.action == "cash"))
@@ -1063,14 +1153,23 @@ async def cb_cash(call: CallbackQuery, callback_data: Act, db: DB, lang: str, st
         await call.answer(t(lang, error), show_alert=True)
         return
 
+    data = await state.get_data()
+    allowed = {s["user_id"] for s in await cover_candidates(db, c, user.id)}
+    covers = [u for u in data.get("covers", []) if u in allowed] if data.get("cid") == c["id"] else []
     await state.clear()
     name = display_name(user)
-    await db.add_payment(c["id"], user.id, name, "", "cash", CONFIRMED)
-    await apply_payment(db, bot, c, user.id)
+    await db.add_payment(c["id"], user.id, name, "", "cash", CONFIRMED, covers)
+    await apply_payment(db, bot, c, user.id, covers)
     await call.answer()
     await safe_edit(call.message, t(lang, "cash_saved"), back_kb(lang))
     await try_send(bot, c["creator_id"], t(lang, "cash_notice", name=esc(name), title=esc(c["title"]),
-                                           amount=fmt_money(c["share"], c["currency"], lang)))
+                                           amount=fmt_money(c["share"] * (1 + len(covers)), c["currency"], lang))
+                   + covers_suffix(lang, shares, covers))
+    await notify_covered(bot, lang, c, name, covers)
+
+
+def covers_suffix(lang: str, shares: dict, covers) -> str:
+    return t(lang, "receipt_for", names=", ".join(esc(shares[u]["name"]) for u in covers)) if covers else ""
 
 
 async def send_receipt(bot: Bot, chat_id: int, file_type: str, file_id: str, caption: str,
@@ -1110,10 +1209,13 @@ async def on_receipt(message: Message, db: DB, lang: str, state: FSMContext, bot
         await show(bot, db, chat_id, t(lang, "payment_saved"), back_kb(lang))
         return
 
-    pid = await db.add_payment(c["id"], user.id, name, file_id, file_type, PENDING)
-    amount = c["amount"] if c["kind"] == QUEUE else c["share"]
+    shares = {s["user_id"]: s for s in await db.get_shares(c["id"])}
+    allowed = {s["user_id"] for s in await cover_candidates(db, c, user.id)} if c["kind"] == SPLIT else set()
+    covers = [u for u in data.get("covers", []) if u in allowed]
+    pid = await db.add_payment(c["id"], user.id, name, file_id, file_type, PENDING, covers)
+    amount = c["amount"] if c["kind"] == QUEUE else c["share"] * (1 + len(covers))
     caption = t(lang, "receipt_caption", name=esc(name), title=esc(c["title"]),
-                amount=fmt_money(amount, c["currency"], lang))
+                amount=fmt_money(amount, c["currency"], lang)) + covers_suffix(lang, shares, covers)
     kb = InlineKeyboardBuilder()
     kb.button(text=t(lang, "btn_confirm"), callback_data=Act(action="ok", cid=c["id"], uid=pid))
     kb.button(text=t(lang, "btn_reject"), callback_data=Act(action="no", cid=c["id"], uid=pid))
@@ -1147,9 +1249,11 @@ async def cb_receipt(call: CallbackQuery, callback_data: Act, db: DB, lang: str,
         if c["status"] != OPEN:
             await call.answer(t(lang, "already_closed"), show_alert=True)
             return
+        covers = parse_covers(p["covers"])
         await db.set_payment_status(p["id"], CONFIRMED)
-        await apply_payment(db, bot, c, p["user_id"])
+        await apply_payment(db, bot, c, p["user_id"], covers)
         await try_send(bot, p["user_id"], t(lang, "payer_confirmed", creator=creator, title=title))
+        await notify_covered(bot, lang, c, p["name"], covers)
         result = t(lang, "confirmed")
     else:
         await db.set_payment_status(p["id"], REJECTED)
@@ -1162,3 +1266,66 @@ async def cb_receipt(call: CallbackQuery, callback_data: Act, db: DB, lang: str,
         await call.message.edit_caption(caption=f"{call.message.html_text}\n\n{result}", reply_markup=None)
     except TelegramAPIError:
         pass
+
+
+# ---------- автор: кто за кого заплатил (в личке) ----------
+
+@router.callback_query(Act.filter(F.action == "att"))
+async def cb_attach(call: CallbackQuery, callback_data: Act, db: DB, lang: str):
+    """Шаг 1: чью долю оплатил другой участник."""
+    c = await creator_only(call, db, callback_data.cid, lang, OPEN)
+    if not c:
+        return
+    pending = await db.pending_users(c["id"])
+    debtors = [s for s in await db.get_shares(c["id"]) if not s["paid"] and s["user_id"] not in pending]
+    if not debtors:
+        await call.answer(t(lang, "attach_none"), show_alert=True)
+        return
+    await call.answer()
+    kb = InlineKeyboardBuilder()
+    for s in debtors:
+        kb.button(text=s["name"][:40], callback_data=Act(action="att2", cid=c["id"], uid=s["user_id"]))
+    kb.button(text=t(lang, "btn_back"), callback_data=Act(action="manage", cid=c["id"]))
+    kb.adjust(1)
+    await safe_edit(call.message, t(lang, "attach_who"), kb.as_markup())
+
+
+@router.callback_query(Act.filter(F.action == "att2"))
+async def cb_attach_payer(call: CallbackQuery, callback_data: Act, db: DB, lang: str, bot: Bot):
+    """Шаг 2: кто за него заплатил. val — выбранный плательщик."""
+    c = await creator_only(call, db, callback_data.cid, lang, OPEN)
+    if not c:
+        return
+    shares = {s["user_id"]: s for s in await db.get_shares(c["id"])}
+    debtor = shares.get(callback_data.uid)
+    if not debtor or debtor["paid"]:
+        await call.answer(t(lang, "already_handled"))
+        return
+
+    if not callback_data.val:
+        await call.answer()
+        kb = InlineKeyboardBuilder()
+        for s in shares.values():
+            if s["user_id"] != debtor["user_id"]:
+                kb.button(text=s["name"][:40],
+                          callback_data=Act(action="att2", cid=c["id"], uid=debtor["user_id"], val=str(s["user_id"])))
+        kb.button(text=t(lang, "btn_back"), callback_data=Act(action="att", cid=c["id"]))
+        kb.adjust(1)
+        await safe_edit(call.message, t(lang, "attach_payer", name=esc(debtor["name"])), kb.as_markup())
+        return
+
+    payer = shares.get(int(callback_data.val))
+    if not payer:
+        await call.answer(t(lang, "already_handled"))
+        return
+    await db.set_paid(c["id"], debtor["user_id"], paid_by=payer["user_id"])
+    if all(s["paid"] for s in await db.get_shares(c["id"])):
+        await db.set_status(c["id"], CLOSED)
+    await refresh(db, bot, c["id"])
+    await notify_covered(bot, lang, c, payer["name"], [debtor["user_id"]])
+    await call.answer()
+    c = await db.get_collection(c["id"])
+    text, _ = await render(db, bot, c["id"])
+    note = t(lang, "attached", name=esc(debtor["name"]), payer=esc(payer["name"]))
+    markup = manage_kb(lang, c["id"], c["kind"]) if c["status"] == OPEN else back_kb(lang, "mine")
+    await safe_edit(call.message, f"{note}\n\n{text}", markup)
