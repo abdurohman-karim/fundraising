@@ -237,6 +237,7 @@ async def open_view(db: DB, bot: Bot, lang: str, g, user_id: int,
         if is_manager(g, user_id, admin_id):
             kb.button(text=t(lang, "btn_remind"), callback_data=G(action="grem", gid=gid))
             kb.button(text=t(lang, "btn_gap_mark"), callback_data=G(action="gmark", gid=gid))
+            kb.button(text=t(lang, "btn_gap_change_card"), callback_data=G(action="gcard", gid=gid))
             kb.button(text=t(lang, "btn_gap_next"), callback_data=G(action="gnext", gid=gid))
         if user_id == admin_id:
             kb.button(text=t(lang, "btn_close"), callback_data=G(action="gclose", gid=gid))
@@ -419,28 +420,47 @@ async def cb_draft_edit(call: CallbackQuery, callback_data: G, db: DB, lang: str
 @router.callback_query(G.filter(F.action == "gcard"))
 async def cb_card(call: CallbackQuery, callback_data: G, db: DB, lang: str, state: FSMContext,
                   admin_id: Optional[int]):
-    g = await admin_draft(call, db, lang, callback_data.gid, admin_id)
+    """Карту задаёт админ в черновике, а в идущем Gap её может сменить и сборщик."""
+    g = await db.get_gap(callback_data.gid)
+    if g and g["status"] == OPEN:
+        g = await manager_open(call, db, lang, g["id"], admin_id)
+    else:
+        g = await admin_draft(call, db, lang, callback_data.gid, admin_id)
     if not g:
         return
     await call.answer()
-    await screen(call, t(lang, "gap_ask_card"), gback(lang, "gdraft", g["id"], cancel=True))
+    text = t(lang, "gap_ask_card")
+    if g["card_number"]:
+        text += t(lang, "gap_card_current", card=gap_card(lang, g))
+    await screen(call, text, gback(lang, "gopen", g["id"], cancel=True))
     await state.set_state(GapForm.card)
     await state.update_data(gid=g["id"])
 
 
 @router.message(GapForm.card, PRIVATE, F.text)
-async def on_card(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot):
+async def on_card(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot, admin_id: Optional[int]):
     chat_id = message.chat.id
     await safe_delete(bot, chat_id, message.message_id)
     gid = (await state.get_data())["gid"]
     parsed = parse_card(message.text)
     if not parsed:
         await show(bot, db, chat_id, f"{t(lang, 'gap_ask_card')}\n\n⚠️ {t(lang, 'bad_card')}",
-                   gback(lang, "gdraft", gid, cancel=True))
+                   gback(lang, "gopen", gid, cancel=True))
         return
     await state.clear()
+    g = await db.get_gap(gid)
+    if not g or g["status"] == CLOSED:
+        await show(bot, db, chat_id, t(lang, "already_closed"), gback(lang))
+        return
     await db.update_gap(gid, card_number=parsed[0], card_holder=parsed[1])
-    await show(bot, db, chat_id, *await draft_view(db, lang, await db.get_gap(gid)))
+    g = await db.get_gap(gid)
+    if g["status"] == DRAFT:
+        await show(bot, db, chat_id, *await draft_view(db, lang, g))
+        return
+    # Gap уже идёт: новая карта сразу на карточке в группе.
+    await refresh_gap(db, bot, gid)
+    text, markup = await open_view(db, bot, lang, g, message.from_user.id, admin_id)
+    await show(bot, db, chat_id, f"{t(lang, 'gap_card_changed')}\n\n{text}", markup)
 
 
 @router.callback_query(G.filter(F.action.in_({"gcol", "gadd"})))
