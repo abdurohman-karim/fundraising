@@ -240,6 +240,7 @@ async def open_view(db: DB, bot: Bot, lang: str, g, user_id: int,
             kb.button(text=t(lang, "btn_gap_change_card"), callback_data=G(action="gcard", gid=gid))
             kb.button(text=t(lang, "btn_gap_next"), callback_data=G(action="gnext", gid=gid))
         if user_id == admin_id:
+            kb.button(text=t(lang, "btn_gap_change_collector"), callback_data=G(action="gcol", gid=gid))
             kb.button(text=t(lang, "btn_close"), callback_data=G(action="gclose", gid=gid))
     kb.button(text=t(lang, "btn_back"), callback_data=G(action="glist"))
     kb.adjust(1)
@@ -466,14 +467,21 @@ async def on_card(message: Message, db: DB, lang: str, state: FSMContext, bot: B
 @router.callback_query(G.filter(F.action.in_({"gcol", "gadd"})))
 async def cb_pick(call: CallbackQuery, callback_data: G, db: DB, lang: str, state: FSMContext, bot: Bot,
                   admin_id: Optional[int]):
-    g = await admin_draft(call, db, lang, callback_data.gid, admin_id)
+    """Участников выбирают в черновике; сборщика админ может сменить и в идущем Gap."""
+    single = callback_data.action == "gcol"
+    g = await db.get_gap(callback_data.gid)
+    if single and g and g["status"] == OPEN:
+        if call.from_user.id != admin_id:
+            await call.answer(t(lang, "admin_only"), show_alert=True)
+            return
+    else:
+        g = await admin_draft(call, db, lang, callback_data.gid, admin_id)
     if not g:
         return
     await call.answer()
     chat_id = call.message.chat.id
-    single = callback_data.action == "gcol"
     await screen(call, t(lang, "gap_ask_collector" if single else "gap_ask_members"),
-                 gback(lang, "gdraft", g["id"], cancel=True))
+                 gback(lang, "gopen", g["id"], cancel=True))
     # Выбор людей работает только через обычную клавиатуру, поэтому для неё нужно отдельное сообщение.
     picker = KeyboardButton(
         text=t(lang, "btn_pick_users"),
@@ -489,13 +497,22 @@ async def cb_pick(call: CallbackQuery, callback_data: G, db: DB, lang: str, stat
 
 
 @router.message(GapForm.picker, PRIVATE, F.users_shared)
-async def on_users_shared(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot):
+async def on_users_shared(message: Message, db: DB, lang: str, state: FSMContext, bot: Bot,
+                          admin_id: Optional[int]):
     chat_id = message.chat.id
     data = await state.get_data()
     await state.clear()
     await safe_delete(bot, chat_id, message.message_id)
     await close_picker(bot, chat_id, data)
     gid = data["gid"]
+    g = await db.get_gap(gid)
+    if g and g["status"] == OPEN and data["single"]:
+        u = message.users_shared.users[0]
+        name = f"@{u.username}" if u.username else (" ".join(filter(None, [u.first_name, u.last_name])) or str(u.user_id))
+        await change_collector(db, bot, lang, g, u.user_id, name)
+        text, markup = await open_view(db, bot, lang, await db.get_gap(gid), message.from_user.id, admin_id)
+        await show(bot, db, chat_id, f"{t(lang, 'gap_collector_changed')}\n\n{text}", markup)
+        return
     for u in message.users_shared.users:
         name = f"@{u.username}" if u.username else (" ".join(filter(None, [u.first_name, u.last_name])) or str(u.user_id))
         if data["single"]:
@@ -509,6 +526,29 @@ async def on_users_shared(message: Message, db: DB, lang: str, state: FSMContext
     g = await db.get_gap(gid)
     if g and g["status"] == DRAFT:
         await show(bot, db, chat_id, *await draft_view(db, lang, g))
+
+
+async def change_collector(db: DB, bot: Bot, lang: str, g, user_id: int, name: str) -> None:
+    """Новый сборщик идущего Gap: чеки на проверке переходят к нему, прежнему — уведомление."""
+    old = g["collector_id"]
+    if user_id == old:
+        return
+    await db.update_gap(g["id"], collector_id=user_id, collector_name=name)
+    await refresh_gap(db, bot, g["id"])
+    title, group = esc(g["title"]), esc(g["chat_title"])
+    await try_send(bot, user_id, t(lang, "gap_you_collect", title=title, group=group))
+    if old:
+        await try_send(bot, old, t(lang, "gap_not_collector", title=title, name=esc(name)))
+    for p in await db.gap_pending(g["id"]):
+        caption = t(lang, "gap_receipt_caption", name=esc(p["name"]), title=title, round=p["round"],
+                    amount=fmt_money(g["amount"], g["currency"], lang))
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_confirm"), callback_data=G(action="gok", gid=g["id"], uid=p["id"]))
+        kb.button(text=t(lang, "btn_reject"), callback_data=G(action="gno", gid=g["id"], uid=p["id"]))
+        try:
+            await send_receipt(bot, user_id, p["file_type"], p["file_id"], caption, kb.as_markup())
+        except TelegramAPIError:
+            break  # новый сборщик ещё не открывал личку с ботом
 
 
 @router.message(GapForm.picker, PRIVATE)

@@ -582,6 +582,12 @@ class DB:
         await self.conn.execute("UPDATE gap_payments SET status = ? WHERE id = ?", (status, pid))
         await self.conn.commit()
 
+    async def gap_pending(self, gid: int) -> List[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            "SELECT * FROM gap_payments WHERE gap_id = ? AND status = ? ORDER BY id", (gid, PENDING)
+        )
+        return list(await cur.fetchall())
+
     async def unmark_gap_paid(self, gid: int, rnd: int, user_id: int) -> None:
         await self.conn.execute(
             "UPDATE gap_payments SET status = ? WHERE gap_id = ? AND round = ? AND user_id = ? AND status = ?",
