@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, TelegramObject
 from dotenv import load_dotenv
 
+import gap
 from db import DB
 from handlers import refresh_open, router, sync_names, sync_user
 from i18n import DEFAULT_LANG
@@ -27,6 +28,7 @@ class LangMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         if user and not user.is_bot:
             await sync_user(data["db"], data["bot"], user)
+            await gap.sync_gap_user(data["db"], data["bot"], user)
         return await handler(event, data)
 
 
@@ -48,11 +50,13 @@ async def main() -> None:
     dp = Dispatcher(db=db, admin_id=admin_id)
     dp.message.middleware(LangMiddleware())
     dp.callback_query.middleware(LangMiddleware())
+    dp.include_router(gap.router)  # раньше основного: у Gap свои ссылки /start gpay_…
     dp.include_router(router)
 
     await bot.set_my_commands([BotCommand(command="menu", description="Меню / Menyu")])
     await sync_names(db, bot)
     await refresh_open(db, bot)
+    await gap.refresh_open_gaps(db, bot)
     try:
         await dp.start_polling(bot)
     finally:

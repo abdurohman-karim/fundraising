@@ -10,6 +10,7 @@ import aiosqlite
 DRAFT, OPEN, CLOSED = "draft", "open", "closed"
 SPLIT, QUEUE = "split", "queue"
 PENDING, CONFIRMED, REJECTED = "pending", "confirmed", "rejected"
+WEEK, MONTH = "week", "month"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -73,6 +74,45 @@ CREATE TABLE IF NOT EXISTS payments (
     covers        TEXT    NOT NULL DEFAULT '',  -- за кого ещё платит (id через запятую)
     status        TEXT    NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL
+);
+
+-- Gap: отдельная от жильцов логика. Каждый тур все участники платят взнос одному — по очереди.
+CREATE TABLE IF NOT EXISTS gaps (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id        INTEGER NOT NULL,
+    chat_title     TEXT    NOT NULL DEFAULT '',
+    title          TEXT    NOT NULL,
+    amount         INTEGER NOT NULL,             -- взнос одного участника за тур
+    currency       TEXT    NOT NULL,
+    period         TEXT    NOT NULL DEFAULT 'month',
+    collector_id   INTEGER,                      -- сборщик: принимает деньги и подтверждает чеки
+    collector_name TEXT    NOT NULL DEFAULT '',
+    card_number    TEXT    NOT NULL DEFAULT '',
+    card_holder    TEXT    NOT NULL DEFAULT '',
+    round          INTEGER NOT NULL DEFAULT 1,   -- тур: получает участник с pos = round - 1
+    status         TEXT    NOT NULL DEFAULT 'draft',
+    message_id     INTEGER,                      -- карточка в группе
+    created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gap_members (
+    gap_id  INTEGER NOT NULL REFERENCES gaps(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    name    TEXT    NOT NULL,
+    pos     INTEGER NOT NULL,
+    PRIMARY KEY (gap_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS gap_payments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    gap_id     INTEGER NOT NULL REFERENCES gaps(id) ON DELETE CASCADE,
+    round      INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    file_id    TEXT    NOT NULL DEFAULT '',
+    file_type  TEXT    NOT NULL,                 -- photo / document / cash / manual
+    status     TEXT    NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL
 );
 """
 
@@ -444,3 +484,140 @@ class DB:
             users.add(row["user_id"])
             users.update(parse_covers(row["covers"]))
         return users
+
+    # --- Gap ---
+
+    GAP_FIELDS = {"title", "amount", "currency", "period", "collector_id", "collector_name",
+                  "card_number", "card_holder", "round", "status", "message_id"}
+
+    async def create_gap(self, chat_id: int, chat_title: str, title: str, amount: int, currency: str) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO gaps (chat_id, chat_title, title, amount, currency, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, chat_title, title, amount, currency, DRAFT, int(time.time())),
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def get_gap(self, gid: int) -> Optional[aiosqlite.Row]:
+        cur = await self.conn.execute("SELECT * FROM gaps WHERE id = ?", (gid,))
+        return await cur.fetchone()
+
+    async def update_gap(self, gid: int, **fields) -> None:
+        assert set(fields) <= self.GAP_FIELDS
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await self.conn.execute(f"UPDATE gaps SET {sets} WHERE id = ?", (*fields.values(), gid))
+        await self.conn.commit()
+
+    async def delete_gap(self, gid: int) -> None:
+        await self.conn.execute("DELETE FROM gaps WHERE id = ?", (gid,))
+        await self.conn.commit()
+
+    async def gap_members(self, gid: int) -> List[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            "SELECT user_id, name, pos FROM gap_members WHERE gap_id = ? ORDER BY pos", (gid,)
+        )
+        return list(await cur.fetchall())
+
+    async def add_gap_member(self, gid: int, user_id: int, name: str) -> bool:
+        """В конец очереди. False, если человек уже в списке."""
+        cur = await self.conn.execute(
+            "INSERT OR IGNORE INTO gap_members (gap_id, user_id, name, pos) "
+            "VALUES (?, ?, ?, (SELECT COALESCE(MAX(pos) + 1, 0) FROM gap_members WHERE gap_id = ?))",
+            (gid, user_id, name, gid),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def remove_gap_member(self, gid: int, user_id: int) -> None:
+        await self.conn.execute("DELETE FROM gap_members WHERE gap_id = ? AND user_id = ?", (gid, user_id))
+        await self.set_gap_order(gid, [m["user_id"] for m in await self.gap_members(gid)])
+
+    async def set_gap_order(self, gid: int, user_ids: Sequence[int]) -> None:
+        for pos, user_id in enumerate(user_ids):
+            await self.conn.execute(
+                "UPDATE gap_members SET pos = ? WHERE gap_id = ? AND user_id = ?", (pos, gid, user_id)
+            )
+        await self.conn.commit()
+
+    async def chat_gaps(self, chat_id: int) -> List[aiosqlite.Row]:
+        cur = await self.conn.execute(
+            "SELECT * FROM gaps WHERE chat_id = ? AND status = ? ORDER BY id", (chat_id, OPEN)
+        )
+        return list(await cur.fetchall())
+
+    async def user_gaps(self, user_id: int, admin: bool) -> List[aiosqlite.Row]:
+        """Админу — все черновики и идущие Gap; остальным — те, где человек сборщик или участник."""
+        if admin:
+            cur = await self.conn.execute(
+                "SELECT * FROM gaps WHERE status IN (?, ?) ORDER BY id", (DRAFT, OPEN)
+            )
+        else:
+            cur = await self.conn.execute(
+                "SELECT * FROM gaps WHERE status = ? AND (collector_id = ? OR id IN "
+                "(SELECT gap_id FROM gap_members WHERE user_id = ?)) ORDER BY id",
+                (OPEN, user_id, user_id),
+            )
+        return list(await cur.fetchall())
+
+    async def open_gap_ids(self) -> List[int]:
+        cur = await self.conn.execute("SELECT id FROM gaps WHERE status = ?", (OPEN,))
+        return [row["id"] for row in await cur.fetchall()]
+
+    async def add_gap_payment(self, gid: int, rnd: int, user_id: int, name: str, file_id: str,
+                              file_type: str, status: str) -> int:
+        cur = await self.conn.execute(
+            "INSERT INTO gap_payments (gap_id, round, user_id, name, file_id, file_type, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (gid, rnd, user_id, name, file_id, file_type, status, int(time.time())),
+        )
+        await self.conn.commit()
+        return cur.lastrowid
+
+    async def get_gap_payment(self, pid: int) -> Optional[aiosqlite.Row]:
+        cur = await self.conn.execute("SELECT * FROM gap_payments WHERE id = ?", (pid,))
+        return await cur.fetchone()
+
+    async def set_gap_payment_status(self, pid: int, status: str) -> None:
+        await self.conn.execute("UPDATE gap_payments SET status = ? WHERE id = ?", (status, pid))
+        await self.conn.commit()
+
+    async def unmark_gap_paid(self, gid: int, rnd: int, user_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE gap_payments SET status = ? WHERE gap_id = ? AND round = ? AND user_id = ? AND status = ?",
+            (REJECTED, gid, rnd, user_id, CONFIRMED),
+        )
+        await self.conn.commit()
+
+    async def gap_round_status(self, gid: int, rnd: int) -> Dict[int, str]:
+        """user_id -> confirmed / pending за этот тур (подтверждённый платёж важнее)."""
+        cur = await self.conn.execute(
+            "SELECT user_id, status FROM gap_payments WHERE gap_id = ? AND round = ? AND status IN (?, ?)",
+            (gid, rnd, PENDING, CONFIRMED),
+        )
+        result: Dict[int, str] = {}
+        for row in await cur.fetchall():
+            if result.get(row["user_id"]) != CONFIRMED:
+                result[row["user_id"]] = row["status"]
+        return result
+
+    async def gap_stored_name(self, user_id: int) -> Optional[str]:
+        cur = await self.conn.execute(
+            "SELECT name FROM gap_members WHERE user_id = ? UNION ALL "
+            "SELECT collector_name FROM gaps WHERE collector_id = ? LIMIT 1",
+            (user_id, user_id),
+        )
+        row = await cur.fetchone()
+        return row["name"] if row else None
+
+    async def rename_gap_user(self, user_id: int, name: str) -> List[int]:
+        """Меняет имя в Gap. Возвращает идущие Gap, где человек есть, — их карточки надо перерисовать."""
+        await self.conn.execute("UPDATE gap_members SET name = ? WHERE user_id = ?", (name, user_id))
+        await self.conn.execute("UPDATE gaps SET collector_name = ? WHERE collector_id = ?", (name, user_id))
+        await self.conn.commit()
+        cur = await self.conn.execute(
+            "SELECT id FROM gaps WHERE status = ? AND (collector_id = ? OR id IN "
+            "(SELECT gap_id FROM gap_members WHERE user_id = ?))",
+            (OPEN, user_id, user_id),
+        )
+        return [row["id"] for row in await cur.fetchall()]

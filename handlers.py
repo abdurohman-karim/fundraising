@@ -128,8 +128,9 @@ def back_kb(lang: str, action: str = "menu", cid: int = 0, cancel: bool = False)
 
 async def reset_state(bot: Bot, chat_id: int, state: FSMContext) -> None:
     """Сбрасывает ввод; если была открыта клавиатура выбора людей — убирает её."""
-    if await state.get_state() == Form.add_members.state:
-        await close_picker(bot, chat_id, await state.get_data())
+    data = await state.get_data()
+    if data.get("picker"):
+        await close_picker(bot, chat_id, data)
     await state.clear()
 
 
@@ -144,7 +145,9 @@ def lang_kb(lang: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin: bool) -> Tuple[str, InlineKeyboardMarkup]:
+async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin: bool,
+                    gap: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+    """gap — показать в личке кнопку «🎯 Gap» (админу и участникам Gap)."""
     kb = InlineKeyboardBuilder()
     if chat_type == "private":
         me = await bot.me()
@@ -152,6 +155,9 @@ async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin:
         kb.button(text=t(lang, "btn_debts"), callback_data=Act(action="debts"))
         kb.button(text=t(lang, "btn_mine"), callback_data=Act(action="mine"))
         sizes = [2, 1]
+        if gap or is_admin:
+            kb.button(text=t(lang, "btn_gap"), callback_data="g:glist:0:0")  # gap.G(action="glist")
+            sizes.append(1)
         if is_admin:
             kb.button(text=t(lang, "btn_add_member"), callback_data=Act(action="addm"))
             kb.button(text=t(lang, "btn_lang"), callback_data=Act(action="lang"))
@@ -168,6 +174,12 @@ async def menu_view(bot: Bot, lang: str, chat_id: int, chat_type: str, is_admin:
     kb.button(text=t(lang, "btn_card"), url=await start_link(bot, "card"))
     kb.adjust(1, 2, 2, 1)
     return t(lang, "menu_group"), kb.as_markup()
+
+
+async def private_menu(bot: Bot, db: DB, lang: str, chat_id: int, user_id: int,
+                       admin_id: Optional[int]) -> Tuple[str, InlineKeyboardMarkup]:
+    is_admin = user_id == admin_id
+    return await menu_view(bot, lang, chat_id, "private", is_admin, bool(await db.user_gaps(user_id, False)))
 
 
 def back_button(kb: InlineKeyboardBuilder, lang: str) -> None:
@@ -472,7 +484,9 @@ async def post_group_menu(db: DB, bot: Bot, chat_id: int, chat_type: str) -> Non
             pinned = None
         if not pinned or pinned.message_id != old:
             await safe_delete(bot, chat_id, old)
-    text, markup = await menu_view(bot, await get_lang(db), chat_id, chat_type, False)
+    from gap import group_menu  # Gap — отдельный модуль; в его группе вместо меню жильцов — меню Gap
+    lang = await get_lang(db)
+    text, markup = await group_menu(db, lang, chat_id) or await menu_view(bot, lang, chat_id, chat_type, False)
     sent = await try_send(bot, chat_id, text, reply_markup=markup)
     if sent:
         GROUP_MENUS[chat_id] = sent.message_id
@@ -503,7 +517,7 @@ async def cmd_start_private(message: Message, command: CommandObject, db: DB, la
     elif args == "debts":
         await show(bot, db, chat_id, await debts_view(db, lang, user.id), back_kb(lang), new=True)
     else:
-        text, markup = await menu_view(bot, lang, chat_id, "private", user.id == admin_id)
+        text, markup = await private_menu(bot, db, lang, chat_id, user.id, admin_id)
         await show(bot, db, chat_id, text, markup, new=True)
 
 
@@ -513,7 +527,7 @@ async def cmd_menu(message: Message, db: DB, lang: str, state: FSMContext, bot: 
     await safe_delete(bot, chat_id, message.message_id)  # в группе — если у бота есть права
     if message.chat.type == "private":
         await reset_state(bot, chat_id, state)
-        text, markup = await menu_view(bot, lang, chat_id, "private", message.from_user.id == admin_id)
+        text, markup = await private_menu(bot, db, lang, chat_id, message.from_user.id, admin_id)
         await show(bot, db, chat_id, text, markup, new=True)
         return
     await db.remember_group(chat_id)
@@ -523,12 +537,14 @@ async def cmd_menu(message: Message, db: DB, lang: str, state: FSMContext, bot: 
 # ---------- меню и навигация ----------
 
 @router.callback_query(Act.filter(F.action == "menu"))
-async def cb_menu(call: CallbackQuery, lang: str, state: FSMContext, bot: Bot, admin_id: Optional[int]):
+async def cb_menu(call: CallbackQuery, db: DB, lang: str, state: FSMContext, bot: Bot, admin_id: Optional[int]):
     await call.answer()
     chat = call.message.chat
     if chat.type == "private":
         await reset_state(bot, chat.id, state)
-    text, markup = await menu_view(bot, lang, chat.id, chat.type, call.from_user.id == admin_id)
+        text, markup = await private_menu(bot, db, lang, chat.id, call.from_user.id, admin_id)
+    else:
+        text, markup = await menu_view(bot, lang, chat.id, chat.type, False)
     await safe_edit(call.message, text, markup)
     if chat.type == "private":
         SCREENS[chat.id] = call.message.message_id
@@ -911,8 +927,8 @@ async def cb_cancel(call: CallbackQuery, callback_data: Act, db: DB, lang: str, 
         return
     await db.delete_collection(c["id"])
     await call.answer(t(lang, "cancelled"))
-    await safe_edit(call.message, *await menu_view(bot, lang, call.message.chat.id, "private",
-                                                   call.from_user.id == admin_id))
+    await safe_edit(call.message, *await private_menu(bot, db, lang, call.message.chat.id,
+                                                      call.from_user.id, admin_id))
 
 
 # ---------- мои сборы: напомнить, изменить, закрыть (в личке) ----------
