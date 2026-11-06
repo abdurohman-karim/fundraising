@@ -63,6 +63,12 @@ def recipient(g, members):
     return members[idx] if 0 <= idx < len(members) else None
 
 
+def payers(g, members):
+    """Кто платит в этом туре: все, кроме получателя и исключённых."""
+    rec = recipient(g, members)
+    return [m for m in members if not m["left"] and (not rec or m["user_id"] != rec["user_id"])]
+
+
 def gap_card(lang: str, g) -> str:
     if not g["card_number"]:
         return "💳 —"
@@ -86,7 +92,7 @@ async def render_card(db: DB, bot: Bot, g, lang: str) -> Tuple[str, Optional[Inl
     ]
     if rec:
         lines.append(t(lang, "gap_card_round", round=g["round"], total=len(members), name=esc(rec["name"]),
-                       sum=fmt_money(g["amount"] * (len(members) - 1), g["currency"], lang)))
+                       sum=fmt_money(g["amount"] * len(payers(g, members)), g["currency"], lang)))
     else:
         lines.append(t(lang, "gap_finished"))
     lines.append(t(lang, "gap_card_collector", name=esc(g["collector_name"])))
@@ -95,7 +101,9 @@ async def render_card(db: DB, bot: Bot, g, lang: str) -> Tuple[str, Optional[Inl
 
     paid = 0
     for i, m in enumerate(members):
-        if not rec:
+        if m["left"]:
+            mark = "🚫"
+        elif not rec:
             mark = "✔️"
         elif m["user_id"] == rec["user_id"]:
             mark = "🎁"
@@ -104,14 +112,16 @@ async def render_card(db: DB, bot: Bot, g, lang: str) -> Tuple[str, Optional[Inl
             paid += st == CONFIRMED
             mark = {CONFIRMED: "✅", PENDING: "🕓"}.get(st, "⏳")
         note = ""
-        if rec and m["user_id"] == rec["user_id"]:
+        if m["left"]:
+            note = t(lang, "gap_left")
+        elif rec and m["user_id"] == rec["user_id"]:
             note = t(lang, "gap_receives")
         elif rec and i < g["round"] - 1:
             note = t(lang, "gap_received")
         lines.append(f"{i + 1}. {mark} {esc(m['name'])}{note}")
     if rec:
         lines.append("")
-        lines.append(t(lang, "gap_paid_count", paid=paid, total=len(members) - 1))
+        lines.append(t(lang, "gap_paid_count", paid=paid, total=len(payers(g, members))))
 
     if not rec:
         return "\n".join(lines), None
@@ -232,7 +242,7 @@ async def open_view(db: DB, bot: Bot, lang: str, g, user_id: int,
     if g["status"] == OPEN:
         members = await db.gap_members(gid)
         rec = recipient(g, members)
-        if any(m["user_id"] == user_id for m in members) and rec and rec["user_id"] != user_id:
+        if any(m["user_id"] == user_id for m in payers(g, members)):
             kb.button(text=t(lang, "btn_pay"), callback_data=G(action="gpay", gid=gid))
         if is_manager(g, user_id, admin_id):
             kb.button(text=t(lang, "btn_remind"), callback_data=G(action="grem", gid=gid))
@@ -241,6 +251,7 @@ async def open_view(db: DB, bot: Bot, lang: str, g, user_id: int,
             kb.button(text=t(lang, "btn_gap_next"), callback_data=G(action="gnext", gid=gid))
         if user_id == admin_id:
             kb.button(text=t(lang, "btn_gap_change_collector"), callback_data=G(action="gcol", gid=gid))
+            kb.button(text=t(lang, "btn_gap_kick"), callback_data=G(action="gkick", gid=gid))
             kb.button(text=t(lang, "btn_close"), callback_data=G(action="gclose", gid=gid))
     kb.button(text=t(lang, "btn_back"), callback_data=G(action="glist"))
     kb.adjust(1)
@@ -599,10 +610,8 @@ async def cb_delete(call: CallbackQuery, callback_data: G, db: DB, lang: str, ad
 # ---------- сборщик: напомнить, отметить, следующий тур ----------
 
 async def debtors(db: DB, g):
-    members = await db.gap_members(g["id"])
-    rec = recipient(g, members)
     status = await db.gap_round_status(g["id"], g["round"])
-    return [m for m in members if m["user_id"] != rec["user_id"] and status.get(m["user_id"]) != CONFIRMED], status
+    return [m for m in payers(g, await db.gap_members(g["id"])) if status.get(m["user_id"]) != CONFIRMED], status
 
 
 @router.callback_query(G.filter(F.action == "grem"))
@@ -623,13 +632,9 @@ async def cb_remind(call: CallbackQuery, callback_data: G, db: DB, lang: str, bo
 
 
 async def mark_view(db: DB, lang: str, g) -> Tuple[str, InlineKeyboardMarkup]:
-    members = await db.gap_members(g["id"])
-    rec = recipient(g, members)
     status = await db.gap_round_status(g["id"], g["round"])
     kb = InlineKeyboardBuilder()
-    for m in members:
-        if m["user_id"] == rec["user_id"]:
-            continue
+    for m in payers(g, await db.gap_members(g["id"])):
         mark = {CONFIRMED: "✅", PENDING: "🕓"}.get(status.get(m["user_id"]), "⏳")
         kb.button(text=f"{mark} {m['name']}"[:60], callback_data=G(action="gtg", gid=g["id"], uid=m["user_id"]))
     kb.button(text=t(lang, "btn_back"), callback_data=G(action="gopen", gid=g["id"]))
@@ -651,7 +656,7 @@ async def cb_toggle(call: CallbackQuery, callback_data: G, db: DB, lang: str, bo
     g = await manager_open(call, db, lang, callback_data.gid, admin_id)
     if not g:
         return
-    member = next((m for m in await db.gap_members(g["id"]) if m["user_id"] == callback_data.uid), None)
+    member = next((m for m in payers(g, await db.gap_members(g["id"])) if m["user_id"] == callback_data.uid), None)
     if not member:
         await call.answer()
         return
@@ -709,13 +714,75 @@ async def cb_close(call: CallbackQuery, callback_data: G, db: DB, lang: str, bot
     await screen(call, *await list_view(db, lang, call.from_user.id, True))
 
 
+@router.callback_query(G.filter(F.action.in_({"gkick", "gkick2"})))
+async def cb_kick(call: CallbackQuery, callback_data: G, db: DB, lang: str, bot: Bot, admin_id: Optional[int]):
+    """Админ исключает участника из идущего Gap: список → подтверждение → исключение."""
+    g = await db.get_gap(callback_data.gid)
+    if call.from_user.id != admin_id:
+        await call.answer(t(lang, "admin_only"), show_alert=True)
+        return
+    if not g or g["status"] != OPEN:
+        await call.answer(t(lang, "already_closed"))
+        return
+    members = await db.gap_members(g["id"])
+    rec = recipient(g, members)
+    gid, uid = g["id"], callback_data.uid
+    active = [m for m in members if not m["left"]]
+    member = next((m for m in active if m["user_id"] == uid), None)
+
+    if not member:  # список, кого можно исключить
+        kb = InlineKeyboardBuilder()
+        for i, m in enumerate(members):
+            if not m["left"] and m["user_id"] != rec["user_id"]:
+                kb.button(text=f"🚫 {i + 1}. {m['name']}"[:60], callback_data=G(action="gkick", gid=gid, uid=m["user_id"]))
+        kb.button(text=t(lang, "btn_back"), callback_data=G(action="gopen", gid=gid))
+        kb.adjust(1)
+        await call.answer()
+        await screen(call, t(lang, "gap_kick_title"), kb.as_markup())
+        return
+    if member["user_id"] == rec["user_id"]:
+        await call.answer(t(lang, "gap_kick_recipient"), show_alert=True)
+        return
+    if len(active) <= 2:
+        await call.answer(t(lang, "gap_need_members"), show_alert=True)
+        return
+
+    received = member["pos"] < g["round"] - 1
+    if callback_data.action == "gkick":
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(lang, "btn_gap_kick_yes"), callback_data=G(action="gkick2", gid=gid, uid=uid))
+        kb.button(text=t(lang, "btn_back"), callback_data=G(action="gkick", gid=gid))
+        kb.adjust(1)
+        text = t(lang, "gap_kick_confirm", name=esc(member["name"]), title=esc(g["title"]))
+        if received:
+            text += t(lang, "gap_kick_received")
+        await call.answer()
+        await screen(call, text, kb.as_markup())
+        return
+
+    # Кто уже получал, остаётся на своём месте с пометкой «исключён» — так не сдвигаются номера туров,
+    # к которым привязаны оплаты. Кто ещё не получал, просто уходит из очереди: она за текущим туром.
+    if received:
+        await db.set_gap_left(gid, uid)
+    else:
+        await db.remove_gap_member(gid, uid)
+    for p in await db.gap_pending(gid):
+        if p["user_id"] == uid:
+            await db.set_gap_payment_status(p["id"], REJECTED)
+    await refresh_gap(db, bot, gid)
+    await try_send(bot, uid, t(lang, "gap_kicked_notice", title=esc(g["title"])))
+    await call.answer(t(lang, "gap_kicked", name=member["name"]))
+    await screen(call, *await open_view(db, bot, lang, await db.get_gap(gid), call.from_user.id, admin_id))
+    await after_confirm(db, bot, lang, gid)  # вдруг без него все уже оплатили
+
+
 # ---------- оплата взноса (в личке) ----------
 
 async def pay_error(db: DB, g, user_id: int) -> Optional[str]:
     if not g or g["status"] != OPEN:
         return "already_closed"
     members = await db.gap_members(g["id"])
-    if not any(m["user_id"] == user_id for m in members):
+    if not any(m["user_id"] == user_id and not m["left"] for m in members):
         return "gap_not_member"
     if recipient(g, members)["user_id"] == user_id:
         return "gap_you_receive"

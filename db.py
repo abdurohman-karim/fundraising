@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS gap_members (
     user_id INTEGER NOT NULL,
     name    TEXT    NOT NULL,
     pos     INTEGER NOT NULL,
+    left    INTEGER NOT NULL DEFAULT 0,  -- исключён после того, как уже получил: остаётся в очереди, но не платит
     PRIMARY KEY (gap_id, user_id)
 );
 
@@ -127,6 +128,7 @@ MIGRATIONS = [
     ("shares", "owed", "INTEGER NOT NULL DEFAULT 0"),
     ("shares", "paid_by", "INTEGER"),
     ("payments", "covers", "TEXT NOT NULL DEFAULT ''"),
+    ("gap_members", "left", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -515,7 +517,7 @@ class DB:
 
     async def gap_members(self, gid: int) -> List[aiosqlite.Row]:
         cur = await self.conn.execute(
-            "SELECT user_id, name, pos FROM gap_members WHERE gap_id = ? ORDER BY pos", (gid,)
+            "SELECT user_id, name, pos, left FROM gap_members WHERE gap_id = ? ORDER BY pos", (gid,)
         )
         return list(await cur.fetchall())
 
@@ -532,6 +534,10 @@ class DB:
     async def remove_gap_member(self, gid: int, user_id: int) -> None:
         await self.conn.execute("DELETE FROM gap_members WHERE gap_id = ? AND user_id = ?", (gid, user_id))
         await self.set_gap_order(gid, [m["user_id"] for m in await self.gap_members(gid)])
+
+    async def set_gap_left(self, gid: int, user_id: int) -> None:
+        await self.conn.execute("UPDATE gap_members SET left = 1 WHERE gap_id = ? AND user_id = ?", (gid, user_id))
+        await self.conn.commit()
 
     async def set_gap_order(self, gid: int, user_ids: Sequence[int]) -> None:
         for pos, user_id in enumerate(user_ids):
@@ -555,7 +561,7 @@ class DB:
         else:
             cur = await self.conn.execute(
                 "SELECT * FROM gaps WHERE status = ? AND (collector_id = ? OR id IN "
-                "(SELECT gap_id FROM gap_members WHERE user_id = ?)) ORDER BY id",
+                "(SELECT gap_id FROM gap_members WHERE user_id = ? AND left = 0)) ORDER BY id",
                 (OPEN, user_id, user_id),
             )
         return list(await cur.fetchall())
